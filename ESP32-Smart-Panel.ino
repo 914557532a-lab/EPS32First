@@ -25,7 +25,7 @@
 #include "App_4G.h"
 #include "App_IR.h"
 #include "App_433.h"
-
+#include "App_Server.h"
 
 // volatile 确保多任务访问时的数据一致性
 volatile float g_SystemTemp = 0.0f;
@@ -85,10 +85,7 @@ void TaskUI_Code(void *pvParameters) {
 // =================================================================
 void TaskSys_Code(void *pvParameters) {
     MySys.init();
-    
-    // [删除] 这里的 analogReadResolution 和 analogSetAttenuation
-    // 因为 MySys.init() 里面已经做过一遍了，不需要重复
-    
+
     static uint32_t lastTempTime = 0;
 
     for(;;) {
@@ -102,7 +99,7 @@ void TaskSys_Code(void *pvParameters) {
         if (millis() - lastTempTime > 1000) {
             lastTempTime = millis();
             
-            // [修改] 不再调用本地函数，而是调用模块封装好的函数
+            // 不再调用本地函数，而是调用模块封装好的函数
             g_SystemTemp = MySys.getTemperatureC(); 
         }
 
@@ -175,8 +172,8 @@ for(;;) {
                     Serial.printf("[Net] 上传失败, 错误码: %d\n", httpResponseCode);
                 }
                 http.end();
-                
-                // 【修正关键点】: 任务完成后，必须释放内存！！！
+
+                // 释放内存
                 if (msg.data != NULL) {
                     free(msg.data); 
                     msg.data = NULL; //以此防止野指针
@@ -250,6 +247,10 @@ void setup() {
     Serial.begin(115200);
     Serial.println("\n\n>>> ESP32 Smart Panel Booting... <<<");
 
+    MyWiFi.init();
+    MyWiFi.connect("HC-2G", "aa888888");
+    MyAudio.init();
+    MyServer.init("192.168.1.53", 8080);
     // 1. 创建队列
     AudioQueue_Handle = xQueueCreate(5, sizeof(AudioMsg));
     KeyQueue_Handle   = xQueueCreate(10, sizeof(KeyAction));
@@ -284,7 +285,27 @@ void setup() {
     Serial.println(">>> All Tasks Started. System Ready. <<<");
 }
 
+// 在 loop() 或 任务中
 void loop() {
-    // 主循环必须留空，或直接删除任务以释放 loop 占用的少量 RAM
-    vTaskDelete(NULL); 
+    MySys.scanLoop(); // 按键扫描
+
+    KeyAction key = MySys.getKeyAction();
+    
+    if (key == KEY_LONG_PRESS_START) {
+        Serial.println("Start Recording...");
+        Audio_Play_Click(); // 提示音
+        MyAudio.startRecording();
+    }
+    else if (key == KEY_LONG_PRESS_END) {
+        Serial.println("Stop Recording & Upload...");
+        MyAudio.stopRecording();
+        Audio_Play_Click(); // 提示音
+        
+        // 关键：发送并处理
+        if (MyWiFi.isConnected()) {
+            MyServer.chatWithServer();
+        } else {
+            Serial.println("WiFi not connected!");
+        }
+    }
 }

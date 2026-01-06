@@ -218,6 +218,70 @@ void AppAudio::stopRecording() {
     Serial.printf("[Audio] Stop. PCM Size: %d bytes (Mono, 16k)\n", pcm_size);
     createWavHeader(record_buffer, pcm_size, 16000, 16, 1);
 }
+
+void AppAudio::playStream(WiFiClient *client, int length) {
+    if (!client || length <= 0) return;
+
+    Serial.printf("[Audio] Start Playing Stream, len: %d\n", length);
+    digitalWrite(PIN_PA_EN, HIGH); // 开启功放
+    
+    uint8_t buf[1024]; // 接收缓冲区
+    size_t bytes_written;
+    int remaining = length;
+    
+    // I2S 写缓冲区 (单声道转双声道需要 2倍空间)
+    // 假设每次处理 512 字节输入 -> 变成 1024 字节输出
+    int16_t out_buf[512]; 
+
+    // 如果是 WAV 文件，前 44 字节是头，可以简单跳过或者直接播放(会有极短杂音)
+    // 为了简单，我们先读44字节扔掉
+    if (remaining > 44) {
+        client->readBytes(buf, 44);
+        remaining -= 44;
+    }
+
+    while (remaining > 0 && client->connected()) {
+        // 1. 从网络读取数据
+        int to_read = (remaining > sizeof(buf)) ? sizeof(buf) : remaining;
+        int len = client->readBytes(buf, to_read);
+        
+        if (len == 0) break;
+
+        // 2. 处理数据 (8bit/16bit 单声道 -> 16bit 双声道)
+        // 服务器发来的是 16bit PCM Little Endian
+        int samples = len / 2; // 样本数
+        int16_t *pcm_samples = (int16_t*)buf;
+        
+        // 分块写入 I2S，防止 out_buf 溢出
+        // 这里的逻辑：每次处理 buf 中的一部分，转成立体声写入
+        // 为了演示简单，直接按块处理：
+        
+        // 实际上由于 RAM 限制，建议不做复杂转换，直接尝试写入。
+        // 但你的 I2S 配置是 I2S_CHANNEL_FMT_RIGHT_LEFT (双声道)
+        // 如果只写单声道数据，声音会变快且只有一边。
+        // 必须做 Mono -> Stereo 扩展
+        
+        for (int i=0; i<samples; i++) {
+            // 构造立体声采样: L = R = pcm_samples[i]
+            // 直接阻塞式写入，每次写一个样本(4字节)效率低，建议凑一包
+            // 这里为了代码短，凑一个小的局部buffer
+            int16_t frame[2];
+            frame[0] = pcm_samples[i];
+            frame[1] = pcm_samples[i];
+            i2s_write(i2s_num, frame, 4, &bytes_written, portMAX_DELAY);
+        }
+        
+        remaining -= len;
+    }
+    
+    // 播放结束，播放一点静音防止尾音截断
+    uint8_t silence[128] = {0};
+    i2s_write(i2s_num, silence, 128, &bytes_written, portMAX_DELAY);
+    
+    Serial.println("[Audio] Play Done.");
+    // 此时不要关闭 PA_EN，可能还有后续操作，或者设个延时关闭
+}
+
 // --- 新增：WAV 头部生成函数实现 ---
 void AppAudio::createWavHeader(uint8_t *header, uint32_t totalDataLen, uint32_t sampleRate, uint8_t sampleBits, uint8_t numChannels) {
     uint32_t byteRate = sampleRate * numChannels * (sampleBits / 8);

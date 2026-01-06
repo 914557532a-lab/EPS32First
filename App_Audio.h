@@ -1,6 +1,6 @@
 #ifndef APP_AUDIO_H
 #define APP_AUDIO_H
-
+#include <WiFi.h> // 新增
 #include <Arduino.h>
 #include <driver/i2s.h>
 
@@ -24,7 +24,7 @@ public:
     // 内部任务处理函数
     void _playTask(void *param);
     void _recordTask(void *param);
-
+    void playStream(WiFiClient *client, int length);//流式播放
     // --- 修复点：将这些变量移到 public 区域，以便外部 (UI Logic) 可以读取 ---
     // --- 新增：录音相关变量 ---
     uint8_t *record_buffer = NULL;       // 录音缓冲区指针
