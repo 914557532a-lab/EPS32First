@@ -135,62 +135,58 @@ void TaskAudio_Code(void *pvParameters) {
     }
 }
 
-// =================================================================
-// [Core 0] 任务 4: 网络通信 (WiFi & 4G)
+
+
 // =================================================================
 // [Core 0] 任务 4: 网络通信 (WiFi & 4G & HTTP上传)
+// =================================================================
 void TaskNet_Code(void *pvParameters) {
-    // 初始化 WiFi 和 4G
+    // 初始化网络
     MyWiFi.init();
-    MyWiFi.connect("HC-5G", "aa888888");
+    MyWiFi.connect("HC-2G", "aa888888"); // 确保这里也是你的 WiFi 账号密码
     
-    My4G.init(); 
-    My4G.powerOn(); 
+    // My4G.init(); // 如果不用4G可以注释掉
+    
+    // 确保服务器IP设置正确 (对应你 Python 电脑的 IP)
+    MyServer.init("192.168.1.53", 8080); 
 
     NetMessage msg;
 
-for(;;) {
-        if (xQueueReceive(NetQueue_Handle, &msg, pdMS_TO_TICKS(50)) == pdTRUE) {
+    for(;;) {
+        // 等待 UI 任务发来的信号
+        if (xQueueReceive(NetQueue_Handle, &msg, pdMS_TO_TICKS(100)) == pdTRUE) {
             
             if (msg.type == NET_EVENT_UPLOAD_AUDIO) {
-                Serial.println("[Net] 收到上传请求，开始 HTTP POST...");
+                Serial.println("[Net] 收到交互请求，开始连接 Python 服务器...");
                 
-                HTTPClient http;
-                http.begin("http://192.168.1.100:5000/upload_audio"); 
-                http.addHeader("Content-Type", "audio/wav");
-                
-                // 执行上传 (使用 msg.data，这是独立的副本)
-                int httpResponseCode = http.POST(msg.data, msg.len);
-                
-                if (httpResponseCode == 200) {
-                    String responseJSON = http.getString();
-                    Serial.println("[Net] 上传成功, AI回复: " + responseJSON);
-                    
-                    // 确保 handleAICommand 内部是线程安全的，或者在这里加锁
-                    // MyUILogic.handleAICommand(responseJSON); 
+                // 确保 WiFi 已连接
+                if (MyWiFi.isConnected()) {
+                    // 直接调用 AppServer 的阻塞式处理函数
+                    // 因为 TaskNet 优先级低，阻塞这里不会影响 UI 流畅度
+                    MyServer.chatWithServer(); 
                 } else {
-                    Serial.printf("[Net] 上传失败, 错误码: %d\n", httpResponseCode);
-                }
-                http.end();
-
-                // 释放内存
-                if (msg.data != NULL) {
-                    free(msg.data); 
-                    msg.data = NULL; //以此防止野指针
-                    Serial.println("[Net] 录音数据内存已释放");
+                    Serial.println("[Net] WiFi 未连接，无法上传");
+                    // 恢复 UI 状态，否则会一直显示“处理中”
+                    MyUILogic.finishAIState();
                 }
             }
-        }
-
-        // --- 2. 周期性网络维护 (可选) ---
-        // 比如每秒检查一次 WiFi 状态，如果断线了重连
-        static uint32_t lastCheck = 0;
-        if (millis() - lastCheck > 1000) {
-            lastCheck = millis();
-            // MyWiFi.maintain(); 
+            
+            // 如果 msg.data 不为空（兼容旧代码），记得释放
+            if (msg.data != NULL) {
+                free(msg.data);
+                msg.data = NULL;
+            }
         }
         
-        // 注意：由于上面 xQueueReceive 设置了超时，这里不需要额外的 vTaskDelay
+        // 简单的自动重连机制
+        static uint32_t lastCheck = 0;
+        if (millis() - lastCheck > 5000) {
+            lastCheck = millis();
+            if (!MyWiFi.isConnected()) {
+                 Serial.println("[Net] WiFi lost, trying to reconnect...");
+                 MyWiFi.connect("HC-2G", "aa888888");
+            }
+        }
     }
 }
 
@@ -287,25 +283,5 @@ void setup() {
 
 // 在 loop() 或 任务中
 void loop() {
-    MySys.scanLoop(); // 按键扫描
-
-    KeyAction key = MySys.getKeyAction();
-    
-    if (key == KEY_LONG_PRESS_START) {
-        Serial.println("Start Recording...");
-        Audio_Play_Click(); // 提示音
-        MyAudio.startRecording();
-    }
-    else if (key == KEY_LONG_PRESS_END) {
-        Serial.println("Stop Recording & Upload...");
-        MyAudio.stopRecording();
-        Audio_Play_Click(); // 提示音
-        
-        // 关键：发送并处理
-        if (MyWiFi.isConnected()) {
-            MyServer.chatWithServer();
-        } else {
-            Serial.println("WiFi not connected!");
-        }
-    }
+    vTaskDelete(NULL);
 }

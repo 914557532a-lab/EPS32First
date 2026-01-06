@@ -53,10 +53,19 @@ void AppIR::sendTestSignal() {
     
     _irSend->sendNEC(0x12345678, 32);
     
-    // 【重要】RMT 发射后建议稍微延时并重置接收
+    // RMT 发射后建议稍微延时并重置接收
     // 避免收发状态机错乱
     vTaskDelay(pdMS_TO_TICKS(10)); // 使用 RTOS 延时
     _irRecv->enableIRIn(); 
     
     Serial.println("[IR] Send Done.");
+}
+
+void AppIR::sendNEC(uint32_t data) {
+    Serial.printf("[IR] Sending NEC: 0x%08X\n", data);
+    _irSend->sendNEC(data, 32);
+    
+    // 发送后稍微延时并恢复接收状态
+    vTaskDelay(pdMS_TO_TICKS(20)); 
+    _irRecv->enableIRIn(); 
 }

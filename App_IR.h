@@ -23,7 +23,7 @@ public:
     
     // 负责接收信号，并处理重复码逻辑
     void loop();
-
+    void sendNEC(uint32_t data);//发射红外命令
     void sendTestSignal();
 
 private:

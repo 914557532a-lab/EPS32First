@@ -63,17 +63,39 @@ void AppServer::chatWithServer() {
         StaticJsonDocument<1024> doc;
         DeserializationError error = deserializeJson(doc, json_str);
         
-        if (!error) {
-            const char* reply = doc["reply_text"];
-            // 处理控制指令
-            bool has_command = doc["control"]["has_command"];
-            if (has_command) {
-                const char* target = doc["control"]["target"];
-                const char* action = doc["control"]["action"];
-                Serial.printf("[Control] Target: %s, Action: %s\n", target, action);
-                // TODO: 这里调用 MyIR.sendXXX() 或其他逻辑
+            if (!error) {
+                const char* reply = doc["reply_text"];
+                Serial.printf("[Server] Reply: %s\n", reply); // 调试打印
+
+                // 处理控制指令
+                // 注意：JSON 里的 "command" 键对应的结构体在 Python 里是 "control" 下的
+                // 请确保 Python 返回的 JSON 结构与这里解析的一致。
+                // 根据你的 Python 代码： resp_json = { ..., "control": command_data }
+                // 所以这里应该是 doc["control"]
+                
+                bool has_command = doc["control"]["has_command"];
+                if (has_command) {
+                    const char* target = doc["control"]["target"]; // "空调"
+                    const char* action = doc["control"]["action"]; // "开", "制冷"
+                    const char* value  = doc["control"]["value"];  // "26"
+
+                    Serial.printf("[Control] Target: %s, Action: %s, Value: %s\n", target, action, value);
+                    
+                    // --- 红外指令映射逻辑 (暂时是示例具体的还不知道) ---
+                    if (strcmp(target, "空调") == 0) {
+                        if (strcmp(action, "开") == 0) {
+                            MyIR.sendNEC(0x11111111); // 假设的
+                        } else if (strcmp(action, "关") == 0) {
+                            MyIR.sendNEC(0x22222222); // 假设的
+                        } else if (value != NULL && strcmp(value, "26") == 0) {//温度，目前只支持26°等到测试通过再具体修改这里的函数
+                            MyIR.sendNEC(0x33333333); // 假设的
+                        }
+                    } else if (strcmp(target, "灯") == 0) {
+                        if (strcmp(action, "开") == 0) MyIR.sendNEC(0x44444444);
+                        else if (strcmp(action, "关") == 0) MyIR.sendNEC(0x55555555);
+                    }
+                }
             }
-        }
         free(json_str);
     }
 

@@ -3,7 +3,7 @@
 #include "Pin_Config.h"
 AppSys MySys;
 
-// --- [搬运] NTC 热敏电阻参数 ---
+// ---  NTC 热敏电阻参数 ---
 // 放在 cpp 文件顶部作为局部常量即可，不需要暴露给外部
 const float R7_VAL  = 8200.0;    // 上拉电阻 8.2K
 const float R48_VAL = 200000.0;  // 下拉电阻 200K

@@ -120,34 +120,18 @@ void AppUILogic::sendAudioToPC() {
         return;
     }
 
-    // 2. 组装消息
+    // 2. 组装消息 (不拷贝数据，只发送事件类型)
     NetMessage msg;
-    msg.type = NET_EVENT_UPLOAD_AUDIO;
-    msg.len  = MyAudio.record_data_len;
+    msg.type = NET_EVENT_UPLOAD_AUDIO; // 复用这个枚举，但含义变为 "Start TCP Chat"
+    msg.len  = 0; 
+    msg.data = NULL; // 不需要拷贝数据，AppServer 直接读取 MyAudio 全局缓冲区
 
-    // 【修正开始】: 申请新内存并拷贝数据
-    // 优先使用 PSRAM (如果有)，否则使用内部 RAM
-    msg.data = (uint8_t*)ps_malloc(msg.len); 
-    if (msg.data == NULL) {
-        // 如果 PSRAM 分配失败，尝试普通 malloc
-        msg.data = (uint8_t*)malloc(msg.len);
-    }
-
-    if (msg.data != NULL) {
-        // 复制数据：从 MyAudio 的缓冲区 -> 刚刚申请的独立内存
-        memcpy(msg.data, MyAudio.record_buffer, msg.len);
-        
-        // 3. 发送给网络任务
-        if (xQueueSend(NetQueue_Handle, &msg, 0) == pdTRUE) {
-            Serial.println("[UI] 录音副本已创建，推送到上传队列");
-        } else {
-            Serial.println("[UI] 错误：网络队列已满，释放内存！");
-            free(msg.data); // 发送失败，必须释放，否则内存泄漏
-        }
+    // 3. 发送给网络任务
+    if (xQueueSend(NetQueue_Handle, &msg, 0) == pdTRUE) {
+        Serial.println("[UI] 已通知网络任务开始处理录音");
     } else {
-        Serial.println("[UI] 错误：内存不足，无法创建录音副本！");
+        Serial.println("[UI] 错误：网络队列已满");
     }
-    // 【修正结束】
 }
 
 // 3. 修改长按结束：更新文本为“处理中”，但不恢复 UI
