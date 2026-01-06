@@ -52,6 +52,33 @@ struct AudioMsg {
     uint8_t type; // 0:Beep, 1:StartRec, 2:StopRec
     int param;
 };
+// =================================================================
+// [Core 1] 任务 1: UI 界面 (LVGL 渲染 & 逻辑)
+// =================================================================
+void TaskUI_Code(void *pvParameters) {
+    // 1. 初始化显示和逻辑
+    MyDisplay.init();
+    MyUILogic.init();
+
+    KeyAction keyMsg;
+
+    for(;;) {
+        // 2. 消费按键队列：将 Sys 任务扫描到的按键传递给 UI 逻辑
+        // 使用 0 等待时间（非阻塞），以免卡住 UI 刷新
+        if (xQueueReceive(KeyQueue_Handle, &keyMsg, 0) == pdTRUE) {
+            MyUILogic.handleInput(keyMsg);
+        }
+
+        // 3. 刷新 LVGL (内部已包含 xGuiSemaphore 锁)
+        MyDisplay.loop();
+        
+        // 4. 处理 UI 业务逻辑 (如状态栏时间更新)
+        MyUILogic.loop();
+        
+        // 5. 短暂延时，释放 CPU 给同核心的其他任务
+        vTaskDelay(pdMS_TO_TICKS(5)); 
+    }
+}
 
 // =================================================================
 // [Core 1] 任务 2: 系统监视 (按键扫描 & 温度)
