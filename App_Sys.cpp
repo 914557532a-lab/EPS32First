@@ -11,7 +11,7 @@ const float VCC     = 3300.0;    // 系统电压 3.3V
 const float NTC_R0  = 100000.0;  // 25°C 阻值 100K
 const float NTC_B   = 3950.0;    // B值
 const float NTC_T0  = 298.15;    // 25°C 的开尔文温度
-
+extern volatile float g_SystemTemp;
 void AppSys::init() {
     // 1. 温度 ADC 初始化
     analogReadResolution(12);       
@@ -65,7 +65,7 @@ void AppSys::scanLoop() {
         // 这里直接调用刚刚升级过的 getTemperatureC
         float t = getTemperatureC();
         uint32_t heap = getFreeHeap();
-        
+        g_SystemTemp = t;
         Serial.printf("[Sys] Temp: %.1f C | Heap: %d KB\n", t, heap / 1024);
         
         if (t > 85.0) {
@@ -74,10 +74,8 @@ void AppSys::scanLoop() {
     }
 }
 
-// ... getKeyAction 函数保持不变 ...
+
 KeyAction AppSys::getKeyAction() {
-    // ... (保持你原有的按键逻辑不变) ...
-    // 为了节省篇幅，这里不重复写按键代码，请保留原样
     static bool lastState = HIGH; 
     bool currentState = digitalRead(PIN_KEY2);
     KeyAction action = KEY_NONE;
