@@ -13,7 +13,7 @@ public:
 
     // 处理输入 (被 Task_UI 调用)
     void handleInput(KeyAction action);
-
+    void finishAIState();
     void sendAudioToPC();                    
     void handleAICommand(String jsonString);
 

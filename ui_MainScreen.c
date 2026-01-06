@@ -17,6 +17,8 @@ lv_obj_t * ui_ButtonAI = NULL;
 lv_obj_t * ui_ImageAI = NULL;
 lv_obj_t * ui_ButtonLink = NULL;
 lv_obj_t * ui_ImageLink = NULL;
+lv_obj_t * ui_LabelDebug = NULL;
+lv_obj_t * ui_LabelAIStatus = NULL;
 // event funtions
 
 // build funtions
@@ -95,12 +97,30 @@ void ui_MainScreen_screen_init(void)
     lv_obj_set_align(ui_PanelMainShow, LV_ALIGN_BOTTOM_MID);
     lv_obj_clear_flag(ui_PanelMainShow, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
     lv_obj_set_style_radius(ui_PanelMainShow, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    // --- 1. 新增：温度显示 Label ---
+    ui_LabelDebug = lv_label_create(ui_PanelMainShow);
+    lv_obj_set_width(ui_LabelDebug, LV_SIZE_CONTENT);
+    lv_obj_set_height(ui_LabelDebug, LV_SIZE_CONTENT);
+    lv_obj_set_align(ui_LabelDebug, LV_ALIGN_TOP_MID); // 顶部居中
+    lv_obj_set_y(ui_LabelDebug, 5); // 距离顶部 5px
+    lv_label_set_text(ui_LabelDebug, "Temp: -- C"); // 默认文字
+    // 注意：如果要显示中文，请确保你的字体支持，否则使用英文 "Temp"
+    
+    // --- 2. 新增：AI状态提示 Label (录音中/处理中) ---
+    ui_LabelAIStatus = lv_label_create(ui_PanelMainShow);
+    lv_obj_set_width(ui_LabelAIStatus, LV_SIZE_CONTENT);
+    lv_obj_set_height(ui_LabelAIStatus, LV_SIZE_CONTENT);
+    lv_obj_set_align(ui_LabelAIStatus, LV_ALIGN_CENTER); // 居中显示
+    lv_label_set_text(ui_LabelAIStatus, "Recording..."); 
+    lv_obj_add_flag(ui_LabelAIStatus, LV_OBJ_FLAG_HIDDEN); // 默认隐藏！
+    // 样式设置（可选：大号字体或显眼颜色）
+    // lv_obj_set_style_text_color(ui_LabelAIStatus, lv_color_hex(0xFF0000), LV_PART_MAIN);
 
     ui_ButtonAI = lv_btn_create(ui_PanelMainShow);
     lv_obj_set_width(ui_ButtonAI, 50);
     lv_obj_set_height(ui_ButtonAI, 50);
     lv_obj_set_x(ui_ButtonAI, -9);
-    lv_obj_set_y(ui_ButtonAI, -9);
+    lv_obj_set_y(ui_ButtonAI, 20);
     lv_obj_set_align(ui_ButtonAI, LV_ALIGN_LEFT_MID);
     lv_obj_add_flag(ui_ButtonAI, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
     lv_obj_clear_flag(ui_ButtonAI, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
@@ -124,7 +144,7 @@ void ui_MainScreen_screen_init(void)
     lv_obj_set_width(ui_ButtonLink, 50);
     lv_obj_set_height(ui_ButtonLink, 50);
     lv_obj_set_x(ui_ButtonLink, 32);
-    lv_obj_set_y(ui_ButtonLink, -9);
+    lv_obj_set_y(ui_ButtonLink, 20);
     lv_obj_set_align(ui_ButtonLink, LV_ALIGN_CENTER);
     lv_obj_add_flag(ui_ButtonLink, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
     lv_obj_clear_flag(ui_ButtonLink, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
@@ -165,5 +185,7 @@ void ui_MainScreen_screen_destroy(void)
     ui_ImageAI = NULL;
     ui_ButtonLink = NULL;
     ui_ImageLink = NULL;
+    ui_LabelDebug = NULL;
+    ui_LabelAIStatus = NULL;
 
 }

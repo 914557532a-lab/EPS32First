@@ -25,6 +25,8 @@ extern lv_obj_t * ui_ButtonAI;
 extern lv_obj_t * ui_ImageAI;
 extern lv_obj_t * ui_ButtonLink;
 extern lv_obj_t * ui_ImageLink;
+extern lv_obj_t * ui_LabelDebug;    // 用于显示温度
+extern lv_obj_t * ui_LabelAIStatus; // 用于显示 状态提示
 // CUSTOM VARIABLES
 
 #ifdef __cplusplus

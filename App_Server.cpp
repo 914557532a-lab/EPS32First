@@ -1,7 +1,7 @@
 #include "App_Server.h"
 #include "App_Audio.h"
 #include "App_IR.h" // 如果你要控制红外
-
+#include "App_UI_Logic.h"
 AppServer MyServer;
 
 void AppServer::init(const char* ip, int port) {
@@ -20,6 +20,7 @@ void AppServer::chatWithServer() {
 
     if (!client.connect(server_ip, server_port)) {
         Serial.println("[Server] Connection failed!");
+        MyUILogic.finishAIState();
         return;
     }
 
@@ -86,7 +87,8 @@ void AppServer::chatWithServer() {
     if (audio_len > 0) {
         MyAudio.playStream(&client, audio_len);
     }
-
+    Serial.println("[Server] Playback finished. Restoring UI.");
+    MyUILogic.finishAIState(); // <--- 调用你刚才写的函数，恢复按钮和温度显示
     client.stop();
     Serial.println("[Server] Transaction Done.");
 }

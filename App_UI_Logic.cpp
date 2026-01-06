@@ -86,7 +86,22 @@ void AppUILogic::executeLongPressStart() {
 
     if (focusedObj == ui_ButtonAI) {
         Serial.println("[UI] LongPress: Start Recording");
-        lv_obj_set_style_bg_color(ui_ButtonAI, lv_color_hex(0xFF4444), LV_PART_MAIN); 
+        
+        // --- 视觉交互修改 START ---
+        // 隐藏常规组件
+        if(ui_ButtonAI) lv_obj_add_flag(ui_ButtonAI, LV_OBJ_FLAG_HIDDEN);
+        if(ui_ButtonLink) lv_obj_add_flag(ui_ButtonLink, LV_OBJ_FLAG_HIDDEN);
+        if(ui_LabelDebug) lv_obj_add_flag(ui_LabelDebug, LV_OBJ_FLAG_HIDDEN); // 隐藏温度
+        
+        // 显示状态文本
+        if(ui_LabelAIStatus) {
+            lv_obj_clear_flag(ui_LabelAIStatus, LV_OBJ_FLAG_HIDDEN);
+            // 这里填写中文 "正在录音..."，前提是你的 LVGL 字体包含这些汉字
+            // 如果只有默认字体，请改回 "Recording..."
+            lv_label_set_text(ui_LabelAIStatus, "Recording..."); 
+        }
+        // --- 视觉交互修改 END ---
+
         MyAudio.startRecording();
         _isRecording = true;
 
@@ -135,18 +150,43 @@ void AppUILogic::sendAudioToPC() {
     // 【修正结束】
 }
 
+// 3. 修改长按结束：更新文本为“处理中”，但不恢复 UI
 void AppUILogic::executeLongPressEnd() {
     if (_isRecording) {
         Serial.println("[UI] Released: Stop Recording");
-        
         MyAudio.stopRecording();
-        
-        lv_obj_set_style_bg_color(ui_ButtonAI, lv_color_hex(0xFFFFFF), LV_PART_MAIN); 
-        
         _isRecording = false;
+
+        // --- 视觉交互修改 START ---
+        // 不要在这里把红色背景改回去，因为按钮已经隐藏了
+        // 也不要恢复 hidden flag
         
-        // --- 修复点 2: 添加分号 ---
+        // 只更新文字提示
+        if(ui_LabelAIStatus) {
+            lv_label_set_text(ui_LabelAIStatus, "Processing..."); // "处理中..."
+        }
+        // --- 视觉交互修改 END ---
+        
         sendAudioToPC(); 
+    }
+}
+void AppUILogic::finishAIState() {
+    if (xSemaphoreTake(xGuiSemaphore, portMAX_DELAY) == pdTRUE) {
+        Serial.println("[UI] AI Process Finished. Restoring UI.");
+
+        // 恢复按钮显示
+        if(ui_ButtonAI) {
+            lv_obj_clear_flag(ui_ButtonAI, LV_OBJ_FLAG_HIDDEN);
+            // 确保颜色改回默认（防止上次长按变红没改回来）
+            lv_obj_set_style_bg_color(ui_ButtonAI, lv_color_hex(0xF9F9F9), LV_PART_MAIN | LV_STATE_DEFAULT);
+        }
+        if(ui_ButtonLink) lv_obj_clear_flag(ui_ButtonLink, LV_OBJ_FLAG_HIDDEN);
+        if(ui_LabelDebug) lv_obj_clear_flag(ui_LabelDebug, LV_OBJ_FLAG_HIDDEN); // 恢复温度显示
+        
+        // 隐藏状态文本
+        if(ui_LabelAIStatus) lv_obj_add_flag(ui_LabelAIStatus, LV_OBJ_FLAG_HIDDEN);
+
+        xSemaphoreGive(xGuiSemaphore);
     }
 }
 
@@ -162,6 +202,11 @@ void AppUILogic::updateStatusBar() {
             lv_label_set_text(ui_LabelTime, timeStr);
         } else {
              lv_label_set_text(ui_LabelTime, "--:--");
+        }
+        if(ui_LabelDebug) {
+             // 格式化字符串，例如 "Temp: 35.5 C"
+             // 注意：SquareLine 默认字体可能不支持中文字符“温度”，建议先用英文
+             lv_label_set_text_fmt(ui_LabelDebug, "Temp: %.1f C", g_SystemTemp);
         }
         xSemaphoreGive(xGuiSemaphore);
     }
