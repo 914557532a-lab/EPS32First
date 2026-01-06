@@ -53,44 +53,36 @@ struct AudioMsg {
     int param;
 };
 
-
-
 // =================================================================
 // [Core 1] 任务 2: 系统监视 (按键扫描 & 温度)
 // =================================================================
 void TaskSys_Code(void *pvParameters) {
     MySys.init();
-
-    // [新增] ADC 初始化配置
-    analogReadResolution(12);       // 12位分辨率
-    analogSetAttenuation(ADC_11db); // 必须设置 11dB 衰减，以支持 >1.1V 的电压测量
-
-    // [新增] 静态时间戳，用于控制测温频率
+    
+    // [删除] 这里的 analogReadResolution 和 analogSetAttenuation
+    // 因为 MySys.init() 里面已经做过一遍了，不需要重复
+    
     static uint32_t lastTempTime = 0;
 
     for(;;) {
-        // 1. 扫描按键状态机 (短按/长按判断)
-        // 这个函数内部维护了状态，调用间隔决定了去抖效果
+        // 1. 扫描按键
         KeyAction action = MySys.getKeyAction();
-
-        // 2. 如果有有效动作，发送给 UI 任务
         if (action != KEY_NONE) {
-            // 发送消息，如果队列满了就丢弃 (防止卡死)
             xQueueSend(KeyQueue_Handle, &action, 0);
         }
 
-        // 3. [新增] 周期性测温 (每 1000ms 执行一次)
-        // 使用非阻塞方式，不影响按键扫描
+        // 2. 周期性测温 (每 1000ms 执行一次)
         if (millis() - lastTempTime > 1000) {
             lastTempTime = millis();
-            updateTemperature(); // 更新全局变量 g_SystemTemp
+            
+            // [修改] 不再调用本地函数，而是调用模块封装好的函数
+            g_SystemTemp = MySys.getTemperatureC(); 
         }
 
-        // 4. 执行系统级扫描 (其他后台任务)
+        // 3. 执行系统级扫描 (日志等)
         MySys.scanLoop();
 
-        // 20ms 周期 = 50Hz 采样率，对人类按键来说足够灵敏且稳定
-        vTaskDelay(pdMS_TO_TICKS(20)); 
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
