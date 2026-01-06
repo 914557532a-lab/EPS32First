@@ -15,8 +15,8 @@ void App4G::init() {
     
     // 关于 GPIO 14 (背光冲突) 的处理：
     // 建议：如果不需要读取网络状态，或者为了防止背光闪烁，
-    // 可以暂时注释掉下面这行，或者只在需要读取时临时设为 INPUT
-    pinMode(PIN_4G_NETSTATE, INPUT); 
+    // 屏幕背光和4g网络状态读取复用同一个口，选择不读取，直接拉高
+    pinMode(PIN_4G_NETSTATE, OUTPUT); 
 
     // 默认引脚状态
     digitalWrite(PIN_4G_PWR_EN, LOW);   

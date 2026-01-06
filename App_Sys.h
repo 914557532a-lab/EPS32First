@@ -14,6 +14,20 @@ enum KeyAction {
     KEY_LONG_PRESS_HOLD,  // 长按保持
     KEY_LONG_PRESS_END    // 长按结束
 };
+// --- [新增] 网络任务消息结构 ---
+enum NetEventType {
+    NET_EVENT_NONE,
+    NET_EVENT_UPLOAD_AUDIO  // 上传录音指令
+};
+
+struct NetMessage {
+    NetEventType type;
+    uint8_t* data;      // 指向音频数据的指针
+    size_t len;         // 数据长度
+};
+
+// 声明全局队列句柄，方便其他文件 extern 引用
+extern QueueHandle_t NetQueue_Handle;
 
 class AppSys {
 public:

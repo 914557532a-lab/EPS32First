@@ -13,30 +13,20 @@
 
 #include <Arduino.h>
 #include <FreeRTOS.h>
-#include <math.h> // [新增] 用于 log() 函数计算温度
+#include <math.h>
 #include <HTTPClient.h>
 // --- 引入所有功能模块 ---
 #include "Pin_Config.h"
 #include "App_Sys.h"
 #include "App_Display.h"
-#include "App_UI_Logic.h" // UI业务逻辑层
+#include "App_UI_Logic.h" 
 #include "App_Audio.h"
 #include "App_WiFi.h"
 #include "App_4G.h"
-#include "App_IR.h"     // 引入 433红外线模块头文件
-#include "App_433.h"    // 引入 433 模块头文件
+#include "App_IR.h"
+#include "App_433.h"
 
-// 电阻参数 (单位: 欧姆)
-const float R7_VAL  = 8200.0;    // 上拉电阻 8.2K
-const float R48_VAL = 200000.0;  // 下拉电阻 200K
-const float VCC     = 3300.0;    // 系统电压 (mV), 3.3V
 
-// NTC 热敏电阻参数 (HNTC0603-104F3950FB)
-const float NTC_R0  = 100000.0;  // 25°C时的标称阻值 (100K)
-const float NTC_B   = 3950.0;    // B值
-const float NTC_T0  = 298.15;    // 25°C 对应的开尔文温度 (273.15 + 25)
-
-// [新增] 全局温度变量 (UI任务读取，Sys任务写入)
 // volatile 确保多任务访问时的数据一致性
 volatile float g_SystemTemp = 0.0f;
 
@@ -44,6 +34,7 @@ volatile float g_SystemTemp = 0.0f;
 QueueHandle_t AudioQueue_Handle = NULL; // 发送播放/录音指令
 QueueHandle_t KeyQueue_Handle   = NULL; // 发送按键事件 (Sys -> UI)
 QueueHandle_t IRQueue_Handle    = NULL; // 发送红外事件 (IR -> Ctrl)
+QueueHandle_t NetQueue_Handle = NULL; //网络请求队列
 
 // 如果 433 也需要控制 UI，建议复用 IRQueue 或者新建一个 RFQueue
 // 这里暂时假设 433 主要用于后台数据记录，或者通过回调处理
@@ -62,64 +53,7 @@ struct AudioMsg {
     int param;
 };
 
-// =================================================================
-// [新增] 辅助逻辑: 温度计算 (供 TaskSys 调用)
-// =================================================================
-void updateTemperature() {
-    // 1. 读取毫伏值 (依赖 ESP32 工厂校准)
-    int raw_mv = analogReadMilliVolts(PIN_ADC_TEMP);
 
-    // 2. 异常过滤 (开路/短路保护)
-    if (raw_mv < 100 || raw_mv > 3200) return;
-
-    // 3. 计算阻值 (电路结构: 3V3 -> R7 -> NTC -> [ADC] -> R48 -> GND)
-    // 公式推导: R_total = (VCC * R48) / V_adc
-    float r_total = (VCC * R48_VAL) / (float)raw_mv;
-    
-    // R_ntc = R_total - R7 - R48
-    float r_ntc = r_total - R7_VAL - R48_VAL;
-
-    // 4. 计算温度 (Steinhart-Hart)
-    if (r_ntc > 0) {
-        float ln_ratio = log(r_ntc / NTC_R0);
-        float kelvin = 1.0 / ( (1.0 / NTC_T0) + (ln_ratio / NTC_B) );
-        
-        // 更新全局变量
-        g_SystemTemp = kelvin - 273.15;
-    }
-}
-
-// =================================================================
-// [Core 1] 任务 1: UI 渲染与交互
-// =================================================================
-void TaskUI_Code(void *pvParameters) {
-    // 1. 初始化底层显示 (TFT + LVGL)
-    MyDisplay.init();
-    
-    // 2. 初始化 UI 业务逻辑 (Group, Focus, Events)
-    MyUILogic.init();
-
-    KeyAction keyEvent;
-
-    for(;;) {
-        // --- A. 渲染核心 (带锁) ---
-        MyDisplay.loop(); 
-
-        // --- B. 处理按键输入 ---
-        // 非阻塞接收：如果有按键按下，Sys 任务会塞入队列
-        if (xQueueReceive(KeyQueue_Handle, &keyEvent, 0) == pdTRUE) {
-            MyUILogic.handleInput(keyEvent);
-        }
-
-        // --- C. 周期性 UI 逻辑 ---
-        // 比如更新时间、刷新 4G 信号条动画
-        // [提示] 在这里可以通过读取 g_SystemTemp 来显示温度
-        MyUILogic.loop();
-
-        // 保持约 200FPS 的刷新率，给 CPU 喘息
-        vTaskDelay(pdMS_TO_TICKS(5)); 
-    }
-}
 
 // =================================================================
 // [Core 1] 任务 2: 系统监视 (按键扫描 & 温度)
@@ -188,29 +122,57 @@ void TaskAudio_Code(void *pvParameters) {
 // =================================================================
 // [Core 0] 任务 4: 网络通信 (WiFi & 4G)
 // =================================================================
+// [Core 0] 任务 4: 网络通信 (WiFi & 4G & HTTP上传)
 void TaskNet_Code(void *pvParameters) {
-
-    // 2. 初始化 WiFi (非阻塞)
+    // 初始化 WiFi 和 4G
     MyWiFi.init();
-    // 连接 WiFi (可以把 SSID 存在 Flash 里读出来)
     MyWiFi.connect("HC-5G", "aa888888");
-
-    // 3. 初始化 4G (这是一个耗时 8 秒的操作！)
-    // 放在这里完全不会卡住 UI
+    
     My4G.init(); 
-    My4G.powerOn(); // 开机 + 握手 + 获取 IMEI
+    My4G.powerOn(); 
+
+    NetMessage msg;
 
     for(;;) {
-        // --- 周期性网络维护 ---
+        // --- 1. 处理队列消息 (阻塞等待 50ms，起到延时作用) ---
+        // 如果队列有数据，立即处理；如果没有，等待 50ms 后继续往下跑，替代了原来的 vTaskDelay
+        if (xQueueReceive(NetQueue_Handle, &msg, pdMS_TO_TICKS(50)) == pdTRUE) {
+            
+            if (msg.type == NET_EVENT_UPLOAD_AUDIO) {
+                Serial.println("[Net] 收到上传请求，开始 HTTP POST...");
+                
+                // --- 这里执行原本在 UI 里的耗时操作 ---
+                HTTPClient http;
+                http.begin("http://192.168.1.100:5000/upload_audio"); 
+                http.addHeader("Content-Type", "audio/wav");
+                
+                // 执行上传 
+                int httpResponseCode = http.POST(msg.data, msg.len);
+
+                if (httpResponseCode == 200) {
+                    String responseJSON = http.getString();
+                    Serial.println("[Net] 上传成功, AI回复: " + responseJSON);
+                    
+                    // 【关键】拿到结果后，直接执行逻辑，或者发回 UI 队列
+                    // 注意：handleAICommand 内部目前只是打印和调 433/IR，是线程安全的
+                    // 如果未来 handleAICommand 要操作 LVGL 界面，必须加锁或发消息回 UI 任务！
+                    MyUILogic.handleAICommand(responseJSON); 
+                } else {
+                    Serial.printf("[Net] 上传失败, 错误码: %d\n", httpResponseCode);
+                }
+                http.end();
+            }
+        }
+
+        // --- 2. 周期性网络维护 (可选) ---
+        // 比如每秒检查一次 WiFi 状态，如果断线了重连
+        static uint32_t lastCheck = 0;
+        if (millis() - lastCheck > 1000) {
+            lastCheck = millis();
+            // MyWiFi.maintain(); 
+        }
         
-        // 比如：每 5 秒检查一次 4G 信号强度，更新给 UI 逻辑层
-        
-        // 注意：这里不要直接调 lvgl 函数，而是更新全局变量或发消息
-        // 为了简单，我们假设 AppUILogic 会自己去查 My4G.getRSSI()
-        
-        // 也可以在这里处理 WiFi 重连逻辑
-        
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        // 注意：由于上面 xQueueReceive 设置了超时，这里不需要额外的 vTaskDelay
     }
 }
 
@@ -271,6 +233,7 @@ void setup() {
     AudioQueue_Handle = xQueueCreate(5, sizeof(AudioMsg));
     KeyQueue_Handle   = xQueueCreate(10, sizeof(KeyAction));
     IRQueue_Handle    = xQueueCreate(5,  sizeof(IREvent)); 
+    NetQueue_Handle   = xQueueCreate(3, sizeof(NetMessage));
 
     if (!AudioQueue_Handle || !KeyQueue_Handle || !IRQueue_Handle) {
         Serial.println("Error: Queue creation failed!");

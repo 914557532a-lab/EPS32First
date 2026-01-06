@@ -5,7 +5,9 @@
 #include "App_WiFi.h"    
 #include <time.h> 
 #include "App_433.h"
-#include <ArduinoJson.h> // <--- 必须添加这行
+#include <ArduinoJson.h> 
+#include "App_Sys.h"
+
 AppUILogic MyUILogic;
 
 extern volatile float g_SystemTemp; 
@@ -96,26 +98,27 @@ void AppUILogic::executeLongPressStart() {
     }
 }
 
-// 这是一个独立的辅助函数，不属于 AppUILogic 类（除非你在 .h 里声明了它）
+
 void AppUILogic::sendAudioToPC() {
-    if (MyAudio.record_buffer == NULL || MyAudio.record_data_len == 0) return;
-
-    HTTPClient http;
-    http.begin("http://192.168.1.100:5000/upload_audio"); 
-    http.addHeader("Content-Type", "audio/wav");
-    
-    int httpResponseCode = http.POST(MyAudio.record_buffer, MyAudio.record_data_len);
-
-    if (httpResponseCode == 200) {
-        String responseJSON = http.getString();
-        Serial.println("AI Response: " + responseJSON);
-        // 调用我们刚刚定义的函数
-        handleAICommand(responseJSON); 
-    } else {
-        Serial.print("Error code: ");
-        Serial.println(httpResponseCode);
+    // 1. 检查数据有效性
+    if (MyAudio.record_buffer == NULL || MyAudio.record_data_len == 0) {
+        Serial.println("[UI] 无录音数据，取消上传");
+        return;
     }
-    http.end();
+
+    // 2. 组装消息
+    NetMessage msg;
+    msg.type = NET_EVENT_UPLOAD_AUDIO;
+    msg.data = MyAudio.record_buffer;    // 传递指针
+    msg.len  = MyAudio.record_data_len;  // 传递长度
+
+    // 3. 发送给网络任务 (非阻塞，立即返回)
+    // 这里的 0 表示如果队列满了（网络任务处理不过来），直接丢弃，不卡 UI
+    if (xQueueSend(NetQueue_Handle, &msg, 0) == pdTRUE) {
+        Serial.println("[UI] 录音已推送到上传队列");
+    } else {
+        Serial.println("[UI] 错误：网络队列已满，上传请求被丢弃！");
+    }
 }
 
 void AppUILogic::executeLongPressEnd() {
