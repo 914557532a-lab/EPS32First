@@ -152,34 +152,36 @@ void TaskNet_Code(void *pvParameters) {
 
     NetMessage msg;
 
-    for(;;) {
-        // --- 1. 处理队列消息 (阻塞等待 50ms，起到延时作用) ---
-        // 如果队列有数据，立即处理；如果没有，等待 50ms 后继续往下跑，替代了原来的 vTaskDelay
+for(;;) {
         if (xQueueReceive(NetQueue_Handle, &msg, pdMS_TO_TICKS(50)) == pdTRUE) {
             
             if (msg.type == NET_EVENT_UPLOAD_AUDIO) {
                 Serial.println("[Net] 收到上传请求，开始 HTTP POST...");
                 
-                // --- 这里执行原本在 UI 里的耗时操作 ---
                 HTTPClient http;
                 http.begin("http://192.168.1.100:5000/upload_audio"); 
                 http.addHeader("Content-Type", "audio/wav");
                 
-                // 执行上传 
+                // 执行上传 (使用 msg.data，这是独立的副本)
                 int httpResponseCode = http.POST(msg.data, msg.len);
-
+                
                 if (httpResponseCode == 200) {
                     String responseJSON = http.getString();
                     Serial.println("[Net] 上传成功, AI回复: " + responseJSON);
                     
-                    // 【关键】拿到结果后，直接执行逻辑，或者发回 UI 队列
-                    // 注意：handleAICommand 内部目前只是打印和调 433/IR，是线程安全的
-                    // 如果未来 handleAICommand 要操作 LVGL 界面，必须加锁或发消息回 UI 任务！
-                    MyUILogic.handleAICommand(responseJSON); 
+                    // 确保 handleAICommand 内部是线程安全的，或者在这里加锁
+                    // MyUILogic.handleAICommand(responseJSON); 
                 } else {
                     Serial.printf("[Net] 上传失败, 错误码: %d\n", httpResponseCode);
                 }
                 http.end();
+                
+                // 【修正关键点】: 任务完成后，必须释放内存！！！
+                if (msg.data != NULL) {
+                    free(msg.data); 
+                    msg.data = NULL; //以此防止野指针
+                    Serial.println("[Net] 录音数据内存已释放");
+                }
             }
         }
 
