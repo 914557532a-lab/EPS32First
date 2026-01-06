@@ -23,7 +23,6 @@
 #include "App_Audio.h"
 #include "App_WiFi.h"
 #include "App_4G.h"
-#include "App_Flash.h"
 #include "App_IR.h"     // 引入 433红外线模块头文件
 #include "App_433.h"    // 引入 433 模块头文件
 
@@ -190,8 +189,6 @@ void TaskAudio_Code(void *pvParameters) {
 // [Core 0] 任务 4: 网络通信 (WiFi & 4G)
 // =================================================================
 void TaskNet_Code(void *pvParameters) {
-    // 1. 初始化 Flash (SPI 总线，注意防冲突)
-    MyFlash.init();
 
     // 2. 初始化 WiFi (非阻塞)
     MyWiFi.init();
@@ -207,6 +204,7 @@ void TaskNet_Code(void *pvParameters) {
         // --- 周期性网络维护 ---
         
         // 比如：每 5 秒检查一次 4G 信号强度，更新给 UI 逻辑层
+        
         // 注意：这里不要直接调 lvgl 函数，而是更新全局变量或发消息
         // 为了简单，我们假设 AppUILogic 会自己去查 My4G.getRSSI()
         
