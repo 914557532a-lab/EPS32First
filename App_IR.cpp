@@ -36,7 +36,7 @@ void AppIR::loop() {
 
             // --- 核心判断逻辑 ---
             // 判断是否为 AUX 协议或者位数特别长 (>64位)
-            if (_results.decode_type == AUX || _results.bits > 64) {
+            if (_results.decode_type == COOLIX || _results.bits > 64) {
                 evt.isAC = true;
                 
                 // 将库里的 state 数组复制到我们的结构体中
@@ -83,16 +83,15 @@ void AppIR::sendNEC(uint32_t data) {
 }
 
 // 【新增】发送 AUX 空调指令
-void AppIR::sendAUX(uint8_t *data, uint16_t len) {
-    Serial.printf("[IR] Sending AUX (%d bytes)...\n", len);
+void AppIR::sendCoolix(uint32_t data) {
+    Serial.printf("[IR] Sending Coolix: 0x%X\n", data);
     
-    // 调用库函数发送
-    // 注意：sendAUX 需要的是字节数组和位数(bits)还是字节数(bytes)取决于库版本
-    // IRremoteESP8266 的 sendAUX 通常接收 (uint8_t *data, uint16_t nbytes)
-    _irSend->sendAUX(data, len); 
+    // Coolix 协议通常发送 24位 (3字节) 的数据
+    // 注意：IRremoteESP8266 的 sendCoolix 默认发送 24位
+    _irSend->sendCoolix(data); 
     
     // 发完恢复接收
-    vTaskDelay(pdMS_TO_TICKS(50)); // 空调码长，多延时一会
+    vTaskDelay(pdMS_TO_TICKS(50)); 
     _irRecv->enableIRIn(); 
-    Serial.println("[IR] AUX Sent.");
+    Serial.println("[IR] Coolix Sent.");
 }

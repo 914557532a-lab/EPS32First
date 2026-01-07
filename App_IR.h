@@ -33,7 +33,7 @@ public:
     
     // 【新增】发送 AUX 空调信号
     // data: 字节数组, len: 字节长度(通常AUX是13)
-    void sendAUX(uint8_t *data, uint16_t len);
+    void sendCoolix(uint32_t data);
 
 private:
     IRrecv* _irRecv = nullptr;
