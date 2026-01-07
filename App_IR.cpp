@@ -88,7 +88,7 @@ void AppIR::sendCoolix(uint32_t data) {
     
     // Coolix 协议通常发送 24位 (3字节) 的数据
     // 注意：IRremoteESP8266 的 sendCoolix 默认发送 24位
-    _irSend->sendCoolix(data); 
+    _irSend->sendCOOLIX(data);
     
     // 发完恢复接收
     vTaskDelay(pdMS_TO_TICKS(50)); 
