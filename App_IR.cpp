@@ -3,9 +3,8 @@
 AppIR MyIR;
 
 const uint16_t kCaptureBufferSize = 1024; 
-const uint8_t kTimeout = 15; 
+const uint8_t kTimeout = 20; // 稍微调大一点超时，防止空调长码被截断
 
-// 引用外部定义的队列 (将在 main.cpp 中定义)
 extern QueueHandle_t IRQueue_Handle; 
 
 void AppIR::init() {
@@ -17,55 +16,83 @@ void AppIR::init() {
     _irSend = new IRsend(PIN_IR_TX);
     _irSend->begin(); 
 
-    Serial.printf("[IR] RMT Driver Started. RX:%d, TX:%d\n", PIN_IR_RX, PIN_IR_TX);
+    Serial.printf("[IR] Driver Started. RX:%d, TX:%d\n", PIN_IR_RX, PIN_IR_TX);
 }
 
 void AppIR::loop() {
-    // 检查是否有数据
     if (_irRecv->decode(&_results)) {
         
-        // 过滤重复码 (NEC 的 0xFFFFFFFF)
-        // 在实际应用中，你可能需要处理重复码来实现 "长按音量键连加" 的功能
-        // 这里为了简单，我们先过滤掉
-        if (_results.value != 0xFFFFFFFF) {
+        // 过滤重复码 (NEC Repeat)
+        if (_results.value != kRepeat) {
             
-            Serial.printf("[IR] Code: 0x%llX, Bits: %d\n", _results.value, _results.bits);
+            IREvent evt;
+            // 清空结构体，防止脏数据
+            memset(&evt, 0, sizeof(IREvent));
 
-            // 【关键整合】将收到的指令打包，扔进队列
-            if (IRQueue_Handle != NULL) {
-                IREvent evt;
-                evt.protocol = _results.decode_type;
-                evt.value = _results.value;
-                evt.bits = _results.bits;
+            evt.protocol = _results.decode_type;
+            evt.bits = _results.bits;
+            evt.value = _results.value; // 默认存一下 value
+            evt.isAC = false;
+
+            // --- 核心判断逻辑 ---
+            // 判断是否为 AUX 协议或者位数特别长 (>64位)
+            if (_results.decode_type == AUX || _results.bits > 64) {
+                evt.isAC = true;
                 
-                // 发送给主任务处理，不阻塞红外接收
+                // 将库里的 state 数组复制到我们的结构体中
+                // 注意：IRremoteESP8266 库解码 AC 时会把数据放在 _results.state[] 中
+                // 且以字节为单位。我们需要计算需要复制多少字节。
+                int byteCount = _results.bits / 8;
+                if (_results.bits % 8 != 0) byteCount++; // 处理非整字节
+                if (byteCount > IR_STATE_SIZE) byteCount = IR_STATE_SIZE; // 防止溢出
+
+                // 复制数据
+                for (int i = 0; i < byteCount; i++) {
+                    evt.state[i] = _results.state[i];
+                }
+                
+                Serial.printf("[IR] 收到空调信号 (Protocol: %s, Bits: %d)\n", typeToString(_results.decode_type).c_str(), _results.bits);
+                Serial.print("[IR] Hex Data: {");
+                for(int i=0; i<byteCount; i++) {
+                    Serial.printf("0x%02X", evt.state[i]);
+                    if(i < byteCount - 1) Serial.print(", ");
+                }
+                Serial.println("}");
+
+            } else {
+                // 普通电视遥控器
+                Serial.printf("[IR] 收到普通信号: 0x%llX (Bits: %d)\n", _results.value, _results.bits);
+            }
+
+            // 发送到队列
+            if (IRQueue_Handle != NULL) {
                 xQueueSend(IRQueue_Handle, &evt, 0);
             }
         } 
         
-        // 准备接收下一条
         _irRecv->resume(); 
     }
 }
 
-void AppIR::sendTestSignal() {
-    Serial.println("[IR] Sending NEC Signal...");
-    
-    _irSend->sendNEC(0x12345678, 32);
-    
-    // RMT 发射后建议稍微延时并重置接收
-    // 避免收发状态机错乱
-    vTaskDelay(pdMS_TO_TICKS(10)); // 使用 RTOS 延时
-    _irRecv->enableIRIn(); 
-    
-    Serial.println("[IR] Send Done.");
-}
-
+// 发送普通 NEC (不变)
 void AppIR::sendNEC(uint32_t data) {
     Serial.printf("[IR] Sending NEC: 0x%08X\n", data);
     _irSend->sendNEC(data, 32);
-    
-    // 发送后稍微延时并恢复接收状态
     vTaskDelay(pdMS_TO_TICKS(20)); 
     _irRecv->enableIRIn(); 
+}
+
+// 【新增】发送 AUX 空调指令
+void AppIR::sendAUX(uint8_t *data, uint16_t len) {
+    Serial.printf("[IR] Sending AUX (%d bytes)...\n", len);
+    
+    // 调用库函数发送
+    // 注意：sendAUX 需要的是字节数组和位数(bits)还是字节数(bytes)取决于库版本
+    // IRremoteESP8266 的 sendAUX 通常接收 (uint8_t *data, uint16_t nbytes)
+    _irSend->sendAUX(data, len); 
+    
+    // 发完恢复接收
+    vTaskDelay(pdMS_TO_TICKS(50)); // 空调码长，多延时一会
+    _irRecv->enableIRIn(); 
+    Serial.println("[IR] AUX Sent.");
 }

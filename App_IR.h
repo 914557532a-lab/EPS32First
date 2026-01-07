@@ -10,21 +10,30 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-// 定义一个红外事件结构体，用于发送给主控逻辑
+// 定义最大空调数据长度 (字节)
+// AUX通常是13字节(104位)，我们给大一点32字节(256位)以防万一
+#define IR_STATE_SIZE 32
+
+// 定义一个红外事件结构体
 struct IREvent {
-    uint32_t protocol; // 协议类型 (NEC, SONY, etc.)
-    uint64_t value;    // 解码后的数值 (例如 0xFFA25D)
-    uint16_t bits;     // 位数
+    decode_type_t protocol;     // 协议类型 (NEC, AUX, etc.)
+    uint64_t value;             // 电视/普通遥控器用的短码 (比如 NEC)
+    uint8_t state[IR_STATE_SIZE]; // 空调专用：存储长编码状态
+    uint16_t bits;              // 位数
+    bool isAC;                  // 标记是否为空调/长码信号
 };
 
 class AppIR {
 public:
     void init();
-    
-    // 负责接收信号，并处理重复码逻辑
     void loop();
-    void sendNEC(uint32_t data);//发射红外命令
-    void sendTestSignal();
+    
+    // 发送普通 NEC 信号
+    void sendNEC(uint32_t data);
+    
+    // 【新增】发送 AUX 空调信号
+    // data: 字节数组, len: 字节长度(通常AUX是13)
+    void sendAUX(uint8_t *data, uint16_t len);
 
 private:
     IRrecv* _irRecv = nullptr;
