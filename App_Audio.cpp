@@ -2,9 +2,46 @@
 #include <Wire.h>
 #include <math.h>
 #include "Pin_Config.h" 
-#include "driver/gpio.h" // 引入 GPIO 驱动，用于复位引脚
+#include "driver/gpio.h"
 
 AppAudio MyAudio;
+
+// ES8311 麦克风增益枚举 (对应寄存器 0x16)
+typedef enum {
+    ES8311MIC_GAIN_0DB = 0,
+    ES8311MIC_GAIN_6DB = 1,
+    ES8311MIC_GAIN_12DB = 2,
+    ES8311MIC_GAIN_18DB = 3,
+    ES8311MIC_GAIN_24DB = 4,
+    ES8311MIC_GAIN_30DB = 5,
+    ES8311MIC_GAIN_36DB = 6,
+    ES8311MIC_GAIN_42DB = 7,
+} es8311_mic_gain_t;
+
+// --- 寄存器定义 (同步自 es8311.h) ---
+#define ES8311_RESET_REG00              0x00
+#define ES8311_CLK_MANAGER_REG01        0x01
+#define ES8311_CLK_MANAGER_REG02        0x02
+#define ES8311_CLK_MANAGER_REG03        0x03
+#define ES8311_CLK_MANAGER_REG04        0x04
+#define ES8311_CLK_MANAGER_REG05        0x05
+#define ES8311_CLK_MANAGER_REG06        0x06
+#define ES8311_CLK_MANAGER_REG07        0x07
+#define ES8311_CLK_MANAGER_REG08        0x08
+#define ES8311_SDPIN_REG09              0x09
+#define ES8311_SDPOUT_REG0A             0x0A
+#define ES8311_SYSTEM_REG0D             0x0D
+#define ES8311_SYSTEM_REG0E             0x0E
+#define ES8311_SYSTEM_REG12             0x12
+#define ES8311_SYSTEM_REG13             0x13
+#define ES8311_SYSTEM_REG14             0x14
+#define ES8311_ADC_REG15                0x15
+#define ES8311_ADC_REG16                0x16
+#define ES8311_ADC_REG17                0x17
+#define ES8311_DAC_REG31                0x31
+#define ES8311_DAC_REG32                0x32
+#define ES8311_DAC_REG37                0x37
+#define ES8311_GP_REG45                 0x45
 
 // --- C 接口实现 ---
 void Audio_Play_Click() {
@@ -34,97 +71,39 @@ struct ToneParams {
 // 2. 修改 0x09/0x0B=0x0C (解决“电流音/噪声”问题，强制 I2S Philips 格式)
 // 3. 增加 0x0E=0x02 (解决“录音为空”问题，开启 ADC 调制器)
 
-const uint8_t es8311_init_data[][2] = {
-    // --- 1. 复位 (参考代码设为 0x80) ---
-    {0x00, 0x80}, // Clock State Machine On, Slave Mode (ESP32是Master)
 
-    // --- 2. 时钟管理 ---
-    // 0x30: 开启 MCLK 和 BCLK 内部时钟 (参考代码初始化值)
-    {0x01, 0x30}, 
-
-    // --- 3. 关键：时钟分频系数 (由 es8311.c 针对 16k/4M MCLK 计算得出) ---
-    // 这部分是消除“滋滋声”的核心
-    {0x02, 0x00}, // Pre-div=1, Mult=1
-    {0x03, 0x10}, // ADC OSR=16, Double Speed=0
-    {0x04, 0x10}, // DAC OSR=16
-    {0x05, 0x00}, // ADC/DAC Div=1
-    
-    // BCLK 分频系数 (重要!)
-    // 4.096MHz / 16kHz = 256.  256 / 4 = 64 BCLKs per LRCK.
-    // 0x03 = (4 - 1). 
-    {0x06, 0x03}, 
-    
-    // LRCK 分频系数 (重要!)
-    {0x07, 0x00}, // LRCK High
-    {0x08, 0xFF}, // LRCK Low (255) - 参考代码使用的值
-
-    // --- 4. 格式配置 (I2S, 16bit) ---
-    // 0x00 对应 I2S 标准格式, 16位数据
-    {0x09, 0x00}, // DAC SDP In
-    {0x0A, 0x00}, // ADC SDP Out (注意：参考代码这里用的是 0x0A 而不是 0x09)
-
-    // --- 5. 系统设置 ---
-    {0x0B, 0x00}, 
-    {0x0C, 0x00},
-    {0x0D, 0x01}, // Power Up Analog
-    {0x0E, 0x02}, // Enable Analog PGA & ADC Modulator
-    {0x10, 0x1F}, // ALC Control
-    {0x11, 0x7F}, // ALC Max Gain
-
-    // --- 6. 启动序列 (参考 es8311_start 函数) ---
-    // 这里的设置对录音至关重要
-    {0x12, 0x00}, // Master/Slave config
-    {0x13, 0x10}, // Cross talk (参考代码值)
-    {0x14, 0x1A}, // 开启模拟麦克风 (Dmic Disable), Max Gain
-    {0x15, 0x40}, // ADC Control (Soft Ramp?) - 参考代码值!
-    {0x16, 0x24}, // Mic Gain (参考代码值)
-    {0x17, 0xBF}, // ADC Volume (Max)
-    
-    {0x1B, 0x0A}, // ADC Automute settings (参考代码)
-    {0x1C, 0x6A}, // ADC Automute settings (参考代码)
-
-    // --- 7. DAC 设置 ---
-    {0x31, 0x00}, // Unmute (Bit 6=0)
-    {0x32, 0xBF}, // DAC Volume
-    {0x37, 0x48}, // DAC Control (参考代码设为 0x48, 之前是 0x08)
-    
-    // --- 8. GPIO/其他 ---
-    {0x45, 0x00}, 
-};
 
 void AppAudio::init() {
-    Serial.println("[Audio] Init Start...");
+    Serial.println("[Audio] Init with ES8311 Official Logic...");
 
-    // 1. I2C 初始化
     if (!Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL)) {
         Serial.println("[Audio] ERROR: I2C Init Failed!");
         return; 
     }
     
-    // 2. 先关闭功放
     pinMode(PIN_PA_EN, OUTPUT);
-    digitalWrite(PIN_PA_EN, LOW);
+    digitalWrite(PIN_PA_EN, LOW); // 先关闭功放
 
-    // 3. 强制复位 I2S 引脚
+    // 强制复位 JTAG 引脚 (GPIO 39-42) 确保 I2S 信号正常
     gpio_reset_pin((gpio_num_t)PIN_I2S_MCLK);
     gpio_reset_pin((gpio_num_t)PIN_I2S_BCLK);
     gpio_reset_pin((gpio_num_t)PIN_I2S_LRCK);
     gpio_reset_pin((gpio_num_t)PIN_I2S_DOUT);
     gpio_reset_pin((gpio_num_t)PIN_I2S_DIN);
 
-    // 4. 配置 I2S (保持 16kHz, Philips 格式)
+    // I2S 配置: 16kHz, 16bit, Standard I2S
     i2s_config_t i2s_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_RX),
         .sample_rate = 16000,
         .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT, 
-        .communication_format = I2S_COMM_FORMAT_STAND_I2S, // Philips 标准
+        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
         .dma_buf_count = 8,
         .dma_buf_len = 64,
-        .use_apll = true,
+        .use_apll = true, // 使用 APLL 获得更精准的时钟
         .tx_desc_auto_clear = true,
-        .fixed_mclk = 16000 * 256 // 4.096 MHz
+        .fixed_mclk = 0   // 自动生成 MCLK (通常是 256 * 16k = 4.096MHz)
     };
 
     i2s_pin_config_t pin_config = {
@@ -140,36 +119,68 @@ void AppAudio::init() {
         return;
     }
     i2s_set_pin(i2s_num, &pin_config);
-    i2s_zero_dma_buffer(i2s_num);
 
-    // 5. 写入 ES8311 寄存器
-    Serial.println("[Audio] Configuring ES8311...");
-    for (int i = 0; i < sizeof(es8311_init_data) / 2; i++) {
-        writeReg(es8311_init_data[i][0], es8311_init_data[i][1]);
-        delay(1); 
-    }
+    // --- ES8311 核心初始化序列 (参考 es8311.c) ---
+    Serial.println("[Audio] Configuring ES8311 Registers...");
     
-    int reg09 = readReg(0x09);
-    writeReg(0x09, reg09 & 0xBF); // DAC Unmute (播放)
+    // 1. 初始时钟配置
+    writeReg(ES8311_CLK_MANAGER_REG01, 0x30);
+    writeReg(ES8311_CLK_MANAGER_REG02, 0x00);
+    writeReg(ES8311_CLK_MANAGER_REG03, 0x10);
+    writeReg(ES8311_ADC_REG16, 0x24); // 初始麦克风增益
+    writeReg(ES8311_CLK_MANAGER_REG04, 0x10);
+    writeReg(ES8311_CLK_MANAGER_REG05, 0x00);
+    writeReg(0x0B, 0x00);
+    writeReg(0x0C, 0x00);
+    writeReg(0x10, 0x1F);
+    writeReg(0x11, 0x7F);
     
-    int reg0A = readReg(0x0A);
-    writeReg(0x0A, reg0A & 0xBF); // ADC Unmute (录音)
-    
-    // 再次确认音量和增益
-    setVolume(75); 
-    setMicGain(0xBF); 
+    // 2. 软件复位
+    writeReg(ES8311_RESET_REG00, 0x80); 
+    delay(5);
+    writeReg(ES8311_RESET_REG00, 0x00); // 退出复位 (Slave模式, bit6=0)
 
-    // 6. 开启功放 (加一点延时等待 Codec 稳定)
-    delay(50);
-    digitalWrite(PIN_PA_EN, HIGH); 
+    // 3. 针对 16kHz / MCLK=256Fs 的时钟精调 (参考 coeff_div 表)
+    // 对于 4.096MHz MCLK: pre_div=1, multi=1, bclk_div=4
+    writeReg(ES8311_CLK_MANAGER_REG01, 0x3F); 
+    writeReg(ES8311_CLK_MANAGER_REG02, 0x00); // pre_div=1, multi=1
+    writeReg(ES8311_CLK_MANAGER_REG05, 0x00); // adc/dac div=1
+    writeReg(ES8311_CLK_MANAGER_REG03, 0x10); // fs_mode=0, adc_osr=16
+    writeReg(ES8311_CLK_MANAGER_REG04, 0x10); // dac_osr=16
+    writeReg(ES8311_CLK_MANAGER_REG06, 0x03); // bclk_div=4 (4-1=3)
+    writeReg(ES8311_CLK_MANAGER_REG07, 0x00); // lrck_h
+    writeReg(ES8311_CLK_MANAGER_REG08, 0xFF); // lrck_l
 
-    // 7. 内存分配
+    // 4. 接口格式设置 (Standard I2S, 16bit)
+    writeReg(ES8311_SDPIN_REG09, 0x0C);  // DAC 16bit, I2S
+    writeReg(ES8311_SDPOUT_REG0A, 0x0C); // ADC 16bit, I2S
+
+    // 5. 电源管理与启动
+    writeReg(ES8311_SYSTEM_REG13, 0x10);
+    writeReg(0x1B, 0x0A);
+    writeReg(0x1C, 0x6A);
+    
+    // 启动序列 (参考 es8311_start)
+    writeReg(ES8311_ADC_REG17, 0xBF);
+    writeReg(ES8311_SYSTEM_REG0E, 0x02);
+    writeReg(ES8311_SYSTEM_REG12, 0x00);
+    writeReg(ES8311_SYSTEM_REG14, 0x1A);
+    writeReg(ES8311_SYSTEM_REG0D, 0x01);
+    writeReg(ES8311_ADC_REG15, 0x40);
+    writeReg(ES8311_DAC_REG32, 0xBF); // 默认音量
+    writeReg(ES8311_DAC_REG37, 0x48);
+    writeReg(ES8311_GP_REG45, 0x00);
+
+    setVolume(75);
+    setMicGain(ES8311MIC_GAIN_30DB); // 提升麦克风增益解决录音空的问题
+    
+    digitalWrite(PIN_PA_EN, HIGH); // 开启功放
+    
+    // 申请 PSRAM
     record_buffer = (uint8_t *)ps_malloc(MAX_RECORD_SIZE);
-    if (record_buffer == NULL) {
-        record_buffer = (uint8_t *)malloc(MAX_RECORD_SIZE);
-    }
+    if (!record_buffer) record_buffer = (uint8_t *)malloc(MAX_RECORD_SIZE);
     
-    Serial.println("[Audio] Init Done.");
+    Serial.println("[Audio] Init Done with Official Logic.");
 }
 
 // ---------------- 播放功能 ----------------
@@ -355,14 +366,20 @@ void AppAudio::createWavHeader(uint8_t *header, uint32_t totalDataLen, uint32_t 
 
 // ---------------- 辅助函数 ----------------
 
-void AppAudio::setVolume(uint8_t vol) {
-    if (vol > 100) vol = 100;
-    uint8_t reg_val = map(vol, 0, 100, 0, 0xBF);
-    writeReg(0x32, reg_val);
+void AppAudio::setVolume(uint8_t volume) {
+    if (volume > 100) volume = 100;
+    // 使用官方驱动的对数映射算法，让音量调节平滑
+    int vol_reg = 0;
+    if (volume != 0) {
+        vol_reg = (int)(255.0 * log10(9.0 * volume / 100.0 + 1.0) / log10(10.0));
+    }
+    writeReg(ES8311_DAC_REG32, vol_reg);
 }
 
-void AppAudio::setMicGain(uint8_t gain) {
-    writeReg(0x14, gain); 
+void AppAudio::setMicGain(uint8_t gain_db) {
+    // 修正：官方驱动中，录音增益主要由 REG 0x16 控制
+    // 建议传入枚举值如 ES8311MIC_GAIN_30DB (0x05)
+    writeReg(ES8311_ADC_REG16, gain_db); 
 }
 
 void AppAudio::writeReg(uint8_t reg, uint8_t data) {
