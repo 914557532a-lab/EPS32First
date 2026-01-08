@@ -17,15 +17,12 @@ extern lv_obj_t * ui_MainScreen;
 extern lv_obj_t * ui_PanelTopTitle;
 extern lv_obj_t * ui_LabelTxt4G;
 extern lv_obj_t * ui_Bar4gsignal;
-extern lv_obj_t * ui_Imagebattery;
-extern lv_obj_t * ui_Barbattery;
 extern lv_obj_t * ui_LabelTime;
 extern lv_obj_t * ui_PanelMainShow;
 extern lv_obj_t * ui_ButtonAI;
 extern lv_obj_t * ui_ImageAI;
 extern lv_obj_t * ui_ButtonLink;
 extern lv_obj_t * ui_ImageLink;
-
 // CUSTOM VARIABLES
 
 #ifdef __cplusplus

@@ -9,8 +9,6 @@ lv_obj_t * ui_MainScreen = NULL;
 lv_obj_t * ui_PanelTopTitle = NULL;
 lv_obj_t * ui_LabelTxt4G = NULL;
 lv_obj_t * ui_Bar4gsignal = NULL;
-lv_obj_t * ui_Imagebattery = NULL;
-lv_obj_t * ui_Barbattery = NULL;
 lv_obj_t * ui_LabelTime = NULL;
 lv_obj_t * ui_PanelMainShow = NULL;
 lv_obj_t * ui_ButtonAI = NULL;
@@ -55,34 +53,10 @@ void ui_MainScreen_screen_init(void)
 
     lv_obj_set_style_radius(ui_Bar4gsignal, 0, LV_PART_INDICATOR | LV_STATE_DEFAULT);
 
-    ui_Imagebattery = lv_img_create(ui_PanelTopTitle);
-    lv_img_set_src(ui_Imagebattery, &ui_img_990005157);
-    lv_obj_set_width(ui_Imagebattery, LV_SIZE_CONTENT);   /// 12
-    lv_obj_set_height(ui_Imagebattery, LV_SIZE_CONTENT);    /// 12
-    lv_obj_set_x(ui_Imagebattery, 30);
-    lv_obj_set_y(ui_Imagebattery, 0);
-    lv_obj_set_align(ui_Imagebattery, LV_ALIGN_CENTER);
-    lv_obj_add_flag(ui_Imagebattery, LV_OBJ_FLAG_ADV_HITTEST);     /// Flags
-    lv_obj_clear_flag(ui_Imagebattery, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
-
-    ui_Barbattery = lv_bar_create(ui_PanelTopTitle);
-    lv_bar_set_value(ui_Barbattery, 25, LV_ANIM_OFF);
-    lv_bar_set_start_value(ui_Barbattery, 0, LV_ANIM_OFF);
-    lv_obj_set_width(ui_Barbattery, 20);
-    lv_obj_set_height(ui_Barbattery, 10);
-    lv_obj_set_x(ui_Barbattery, 49);
-    lv_obj_set_y(ui_Barbattery, 0);
-    lv_obj_set_align(ui_Barbattery, LV_ALIGN_CENTER);
-    lv_obj_set_style_radius(ui_Barbattery, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-
-    lv_obj_set_style_radius(ui_Barbattery, 0, LV_PART_INDICATOR | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_color(ui_Barbattery, lv_color_hex(0x42C871), LV_PART_INDICATOR | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_opa(ui_Barbattery, 255, LV_PART_INDICATOR | LV_STATE_DEFAULT);
-
     ui_LabelTime = lv_label_create(ui_PanelTopTitle);
     lv_obj_set_width(ui_LabelTime, LV_SIZE_CONTENT);   /// 1
     lv_obj_set_height(ui_LabelTime, LV_SIZE_CONTENT);    /// 1
-    lv_obj_set_x(ui_LabelTime, 4);
+    lv_obj_set_x(ui_LabelTime, 24);
     lv_obj_set_y(ui_LabelTime, 0);
     lv_obj_set_align(ui_LabelTime, LV_ALIGN_CENTER);
     lv_label_set_text(ui_LabelTime, "10.30");
@@ -100,7 +74,7 @@ void ui_MainScreen_screen_init(void)
     lv_obj_set_width(ui_ButtonAI, 50);
     lv_obj_set_height(ui_ButtonAI, 50);
     lv_obj_set_x(ui_ButtonAI, -9);
-    lv_obj_set_y(ui_ButtonAI, 20);
+    lv_obj_set_y(ui_ButtonAI, -9);
     lv_obj_set_align(ui_ButtonAI, LV_ALIGN_LEFT_MID);
     lv_obj_add_flag(ui_ButtonAI, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
     lv_obj_clear_flag(ui_ButtonAI, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
@@ -124,7 +98,7 @@ void ui_MainScreen_screen_init(void)
     lv_obj_set_width(ui_ButtonLink, 50);
     lv_obj_set_height(ui_ButtonLink, 50);
     lv_obj_set_x(ui_ButtonLink, 32);
-    lv_obj_set_y(ui_ButtonLink, 20);
+    lv_obj_set_y(ui_ButtonLink, -9);
     lv_obj_set_align(ui_ButtonLink, LV_ALIGN_CENTER);
     lv_obj_add_flag(ui_ButtonLink, LV_OBJ_FLAG_SCROLL_ON_FOCUS);     /// Flags
     lv_obj_clear_flag(ui_ButtonLink, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
@@ -157,8 +131,6 @@ void ui_MainScreen_screen_destroy(void)
     ui_PanelTopTitle = NULL;
     ui_LabelTxt4G = NULL;
     ui_Bar4gsignal = NULL;
-    ui_Imagebattery = NULL;
-    ui_Barbattery = NULL;
     ui_LabelTime = NULL;
     ui_PanelMainShow = NULL;
     ui_ButtonAI = NULL;

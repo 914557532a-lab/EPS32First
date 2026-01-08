@@ -40,7 +40,6 @@ extern "C" {
 extern lv_obj_t * ui____initial_actions0;
 
 // IMAGES AND IMAGE SETS
-LV_IMG_DECLARE(ui_img_990005157);    // assets/battery-line.png
 LV_IMG_DECLARE(ui_img_648949130);    // assets/chat-smile-ai-line (1).png
 LV_IMG_DECLARE(ui_img_160084951);    // assets/links-line.png
 
