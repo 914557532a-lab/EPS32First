@@ -91,16 +91,7 @@ void AppUILogic::executeLongPressStart() {
         // 隐藏常规组件
         if(ui_ButtonAI) lv_obj_add_flag(ui_ButtonAI, LV_OBJ_FLAG_HIDDEN);
         if(ui_ButtonLink) lv_obj_add_flag(ui_ButtonLink, LV_OBJ_FLAG_HIDDEN);
-        if(ui_LabelDebug) lv_obj_add_flag(ui_LabelDebug, LV_OBJ_FLAG_HIDDEN); // 隐藏温度
         
-        // 显示状态文本
-        if(ui_LabelAIStatus) {
-            lv_obj_clear_flag(ui_LabelAIStatus, LV_OBJ_FLAG_HIDDEN);
-            // 这里填写中文 "正在录音..."，前提是你的 LVGL 字体包含这些汉字
-            // 如果只有默认字体，请改回 "Recording..."
-            lv_label_set_text(ui_LabelAIStatus, "Recording..."); 
-        }
-        // --- 视觉交互修改 END ---
 
         MyAudio.startRecording();
         _isRecording = true;
@@ -140,16 +131,6 @@ void AppUILogic::executeLongPressEnd() {
         Serial.println("[UI] Released: Stop Recording");
         MyAudio.stopRecording();
         _isRecording = false;
-
-        // --- 视觉交互修改 START ---
-        // 不要在这里把红色背景改回去，因为按钮已经隐藏了
-        // 也不要恢复 hidden flag
-        
-        // 只更新文字提示
-        if(ui_LabelAIStatus) {
-            lv_label_set_text(ui_LabelAIStatus, "Processing..."); // "处理中..."
-        }
-        // --- 视觉交互修改 END ---
         
         sendAudioToPC(); 
     }
@@ -165,32 +146,37 @@ void AppUILogic::finishAIState() {
             lv_obj_set_style_bg_color(ui_ButtonAI, lv_color_hex(0xF9F9F9), LV_PART_MAIN | LV_STATE_DEFAULT);
         }
         if(ui_ButtonLink) lv_obj_clear_flag(ui_ButtonLink, LV_OBJ_FLAG_HIDDEN);
-        if(ui_LabelDebug) lv_obj_clear_flag(ui_LabelDebug, LV_OBJ_FLAG_HIDDEN); // 恢复温度显示
-        
-        // 隐藏状态文本
-        if(ui_LabelAIStatus) lv_obj_add_flag(ui_LabelAIStatus, LV_OBJ_FLAG_HIDDEN);
 
         xSemaphoreGive(xGuiSemaphore);
     }
 }
 
 void AppUILogic::updateStatusBar() {
+    // 必须检查互斥锁，防止与 Core 0 的 App_Server 冲突
     if (xSemaphoreTake(xGuiSemaphore, 0) == pdTRUE) {
-        int signalLevel = 75; // 模拟数据
-        lv_bar_set_value(ui_Bar4gsignal, signalLevel, LV_ANIM_ON);
+        
+        // 1. 确保当前确实在主屏幕，且主屏幕对象有效
+        // 如果当前是二维码屏幕，ui_MainScreen 可能已被标记为无效或不可见
+        if (lv_scr_act() == ui_MainScreen && ui_MainScreen != NULL) {
+            
+            // 2. 信号栏刷新 (假设 ui_Bar4gsignal 也是主屏幕的子对象)
+            if (ui_Bar4gsignal) {
+                 int signalLevel = 75; 
+                 lv_bar_set_value(ui_Bar4gsignal, signalLevel, LV_ANIM_ON);
+            }
 
-        struct tm timeinfo;
-        if (getLocalTime(&timeinfo, 0)) { 
-            char timeStr[10];
-            sprintf(timeStr, "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
-            lv_label_set_text(ui_LabelTime, timeStr);
-        } else {
-             lv_label_set_text(ui_LabelTime, "--:--");
-        }
-        if(ui_LabelDebug) {
-             // 格式化字符串，例如 "Temp: 35.5 C"
-             // 注意：SquareLine 默认字体可能不支持中文字符“温度”，建议先用英文
-             lv_label_set_text_fmt(ui_LabelDebug, "Temp: %.1f C", g_SystemTemp);
+            // 3. 时间刷新
+            if (ui_LabelTime) {
+                struct tm timeinfo;
+                if (getLocalTime(&timeinfo, 0)) { 
+                    char timeStr[10];
+                    sprintf(timeStr, "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
+                    lv_label_set_text(ui_LabelTime, timeStr);
+                }
+            }
+
+            // 4. 温度刷新 (最可能的崩溃点)
+            // 务必确保 ui_LabelDebug 不为空
         }
         xSemaphoreGive(xGuiSemaphore);
     }

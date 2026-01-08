@@ -143,7 +143,7 @@ void TaskAudio_Code(void *pvParameters) {
 // =================================================================
 void TaskNet_Code(void *pvParameters) {
     // 初始化网络
-    vTaskDelay(pdMS_TO_TICKS(1000))
+    vTaskDelay(pdMS_TO_TICKS(1000));
     MyWiFi.init();
     MyWiFi.connect("HC-2G", "aa888888"); // 确保这里也是你的 WiFi 账号密码
     
