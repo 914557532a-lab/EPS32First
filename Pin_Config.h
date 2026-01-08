@@ -106,10 +106,5 @@
 
 // Flash SPI (通常由系统自动管理，不建议在应用层重定义，仅作记录)
 // CS1=5, MISO=SPIQ, CLK=SPICLK, MOSI=SPID
-#define PIN_FLASH_CS    5   // SPI_CS1 -> FLASH_SPICS0
-#define PIN_FLASH_CLK   4   // SPI_CLK (GPIO 4)
-#define PIN_FLASH_MOSI  2   // SPI_MOSI (GPIO 2)
-// 注意：Flash 的 MISO 也是屏幕的 DC 脚 (GPIO 3)
-#define PIN_FLASH_MISO  3   // SPI_MISO (GPIO 3)
 
 #endif // PIN_CONFIG_H

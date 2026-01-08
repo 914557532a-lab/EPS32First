@@ -143,6 +143,7 @@ void TaskAudio_Code(void *pvParameters) {
 // =================================================================
 void TaskNet_Code(void *pvParameters) {
     // 初始化网络
+    vTaskDelay(pdMS_TO_TICKS(1000))
     MyWiFi.init();
     MyWiFi.connect("HC-2G", "aa888888"); // 确保这里也是你的 WiFi 账号密码
     
@@ -274,7 +275,7 @@ void setup() {
 
     // [Core 1] 应用/交互层 (负责业务逻辑和界面)
     // UI 优先级设为 3，保证交互丝滑
-    xTaskCreatePinnedToCore(TaskUI_Code,    "UI",      8192, NULL, 3, &TaskUI_Handle,    1);
+    xTaskCreatePinnedToCore(TaskUI_Code, "UI", 32768, NULL, 3, &TaskUI_Handle, 1);
     // Sys 负责按键，优先级 2 即可
     xTaskCreatePinnedToCore(TaskSys_Code,   "Sys",     4096, NULL, 2, &TaskSys_Handle,   1);
 
