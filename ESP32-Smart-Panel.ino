@@ -66,7 +66,9 @@ void TaskUI_Code(void *pvParameters) {
     for(;;) {
         // 2. 消费按键队列：将 Sys 任务扫描到的按键传递给 UI 逻辑
         // 使用 0 等待时间（非阻塞），以免卡住 UI 刷新
+        lv_tick_inc(5);
         if (xQueueReceive(KeyQueue_Handle, &keyMsg, 0) == pdTRUE) {
+            Serial.printf("[UI] Key Received: %d\n", keyMsg);
             MyUILogic.handleInput(keyMsg);
         }
 
