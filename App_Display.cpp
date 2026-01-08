@@ -25,6 +25,8 @@ void AppDisplay::my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_co
 }
 
 void AppDisplay::init() {
+    gpio_reset_pin((gpio_num_t)3); 
+    pinMode(3, OUTPUT); // 显式设为输出
     // 1. 创建互斥锁
     xGuiSemaphore = xSemaphoreCreateMutex();
 
@@ -38,6 +40,7 @@ void AppDisplay::init() {
 
     lv_init();
     lv_disp_draw_buf_init(&draw_buf, buf, NULL, screenWidth * screenHeight / 10);
+
 
     static lv_disp_drv_t disp_drv;
     lv_disp_drv_init(&disp_drv);
