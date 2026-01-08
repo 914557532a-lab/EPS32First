@@ -29,7 +29,8 @@ void AppDisplay::init() {
     xGuiSemaphore = xSemaphoreCreateMutex();
 
     // 2. 硬件初始化//由于是和4G模块共用的线所以智能input模式，缺点是屏幕会闪烁，忽略这个。
-    pinMode(PIN_TFT_BL, INPUT);
+    pinMode(PIN_TFT_BL, OUTPUT);
+    digitalWrite(PIN_TFT_BL, HIGH); // 强制开启背光
 
     tft.begin();
     tft.setRotation(0);

@@ -243,6 +243,7 @@ void Task433_Code(void *pvParameters) {
 // =================================================================
 void setup() {
     Serial.begin(115200);
+    delay(2000); // 增加 2 秒延时，等待串口连接建立
     Serial.println("\n\n>>> ESP32 Smart Panel Booting... <<<");
 
     MyWiFi.init();
