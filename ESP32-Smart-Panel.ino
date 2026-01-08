@@ -1,6 +1,7 @@
 /**
  * @file ESP32-Smart-Panel.ino
  * @brief 主程序入口 - FreeRTOS 任务调度器
+
  * @details 负责初始化所有队列、任务，并将它们分配到双核 CPU 上。
  * * 架构概览:
  * [Core 1] TaskUI  (高优): 负责 LVGL 渲染、UI 逻辑、按键响应 (流畅度关键)
@@ -245,7 +246,6 @@ void setup() {
 
     MyWiFi.init();
     MyWiFi.connect("HC-2G", "aa888888");
-    MyAudio.init();
     MyServer.init("192.168.1.53", 8080);
     // 1. 创建队列
     AudioQueue_Handle = xQueueCreate(5, sizeof(AudioMsg));
