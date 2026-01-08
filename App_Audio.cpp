@@ -27,47 +27,104 @@ struct ToneParams {
 };
 
 // ES8311 初始化配置
+// 替换原有的 es8311_init_data
+// 在 App_Audio.cpp 顶部替换这个数组
+// 修复版配置数组：
+// 1. 恢复 0x01=0x30 (解决“死寂/无声”问题，恢复时钟)
+// 2. 修改 0x09/0x0B=0x0C (解决“电流音/噪声”问题，强制 I2S Philips 格式)
+// 3. 增加 0x0E=0x02 (解决“录音为空”问题，开启 ADC 调制器)
+
 const uint8_t es8311_init_data[][2] = {
-    {0x45, 0x00}, {0x01, 0x30}, {0x02, 0x10}, {0x02, 0x00}, 
-    {0x03, 0x10}, {0x04, 0x10}, {0x05, 0x00}, {0x0B, 0x00}, 
-    {0x0C, 0x00}, {0x0D, 0x01}, {0x10, 0x1F}, {0x11, 0x7F}, 
-    {0x12, 0x00}, {0x13, 0x00}, {0x14, 0x1A}, {0x32, 0xBF}, 
-    {0x37, 0x08}, {0x00, 0x80},
+    // --- 1. 复位 (参考代码设为 0x80) ---
+    {0x00, 0x80}, // Clock State Machine On, Slave Mode (ESP32是Master)
+
+    // --- 2. 时钟管理 ---
+    // 0x30: 开启 MCLK 和 BCLK 内部时钟 (参考代码初始化值)
+    {0x01, 0x30}, 
+
+    // --- 3. 关键：时钟分频系数 (由 es8311.c 针对 16k/4M MCLK 计算得出) ---
+    // 这部分是消除“滋滋声”的核心
+    {0x02, 0x00}, // Pre-div=1, Mult=1
+    {0x03, 0x10}, // ADC OSR=16, Double Speed=0
+    {0x04, 0x10}, // DAC OSR=16
+    {0x05, 0x00}, // ADC/DAC Div=1
+    
+    // BCLK 分频系数 (重要!)
+    // 4.096MHz / 16kHz = 256.  256 / 4 = 64 BCLKs per LRCK.
+    // 0x03 = (4 - 1). 
+    {0x06, 0x03}, 
+    
+    // LRCK 分频系数 (重要!)
+    {0x07, 0x00}, // LRCK High
+    {0x08, 0xFF}, // LRCK Low (255) - 参考代码使用的值
+
+    // --- 4. 格式配置 (I2S, 16bit) ---
+    // 0x00 对应 I2S 标准格式, 16位数据
+    {0x09, 0x00}, // DAC SDP In
+    {0x0A, 0x00}, // ADC SDP Out (注意：参考代码这里用的是 0x0A 而不是 0x09)
+
+    // --- 5. 系统设置 ---
+    {0x0B, 0x00}, 
+    {0x0C, 0x00},
+    {0x0D, 0x01}, // Power Up Analog
+    {0x0E, 0x02}, // Enable Analog PGA & ADC Modulator
+    {0x10, 0x1F}, // ALC Control
+    {0x11, 0x7F}, // ALC Max Gain
+
+    // --- 6. 启动序列 (参考 es8311_start 函数) ---
+    // 这里的设置对录音至关重要
+    {0x12, 0x00}, // Master/Slave config
+    {0x13, 0x10}, // Cross talk (参考代码值)
+    {0x14, 0x1A}, // 开启模拟麦克风 (Dmic Disable), Max Gain
+    {0x15, 0x40}, // ADC Control (Soft Ramp?) - 参考代码值!
+    {0x16, 0x24}, // Mic Gain (参考代码值)
+    {0x17, 0xBF}, // ADC Volume (Max)
+    
+    {0x1B, 0x0A}, // ADC Automute settings (参考代码)
+    {0x1C, 0x6A}, // ADC Automute settings (参考代码)
+
+    // --- 7. DAC 设置 ---
+    {0x31, 0x00}, // Unmute (Bit 6=0)
+    {0x32, 0xBF}, // DAC Volume
+    {0x37, 0x48}, // DAC Control (参考代码设为 0x48, 之前是 0x08)
+    
+    // --- 8. GPIO/其他 ---
+    {0x45, 0x00}, 
 };
 
 void AppAudio::init() {
     Serial.println("[Audio] Init Start...");
 
-    // --- 修复 1: I2C 初始化检查 (防止因未焊接芯片导致崩溃) ---
-    // 如果 I2C 总线无法启动（例如引脚悬空），直接返回，不执行后续操作
+    // 1. I2C 初始化
     if (!Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL)) {
-        Serial.println("[Audio] ERROR: I2C Init Failed! (Check Hardware/Soldering)");
+        Serial.println("[Audio] ERROR: I2C Init Failed!");
         return; 
     }
     
+    // 2. 先关闭功放
     pinMode(PIN_PA_EN, OUTPUT);
     digitalWrite(PIN_PA_EN, LOW);
 
-    // --- 修复 2: JTAG 引脚复位 (防止 GPIO 39-42 默认为 JTAG 导致 I2S 异常) ---
-    // ESP32-S3 的 GPIO 39-42 默认是 JTAG 调试口，需要强制复位为普通 GPIO
+    // 3. 强制复位 I2S 引脚
     gpio_reset_pin((gpio_num_t)PIN_I2S_MCLK);
     gpio_reset_pin((gpio_num_t)PIN_I2S_BCLK);
     gpio_reset_pin((gpio_num_t)PIN_I2S_LRCK);
     gpio_reset_pin((gpio_num_t)PIN_I2S_DOUT);
     gpio_reset_pin((gpio_num_t)PIN_I2S_DIN);
 
+    // 4. 配置 I2S (保持 16kHz, Philips 格式)
     i2s_config_t i2s_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_RX),
         .sample_rate = 16000,
         .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
-        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT, 
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S, // Philips 标准
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
         .dma_buf_count = 8,
         .dma_buf_len = 64,
         .use_apll = true,
         .tx_desc_auto_clear = true,
-        .fixed_mclk = 0
+        .fixed_mclk = 16000 * 256 // 4.096 MHz
     };
 
     i2s_pin_config_t pin_config = {
@@ -78,32 +135,38 @@ void AppAudio::init() {
         .data_in_num = PIN_I2S_DIN
     };
 
-    // 安装驱动并检查结果
     if (i2s_driver_install(i2s_num, &i2s_config, 0, NULL) != ESP_OK) {
-        Serial.println("[Audio] I2S Driver Install Failed!");
+        Serial.println("[Audio] I2S Install Failed!");
         return;
     }
     i2s_set_pin(i2s_num, &pin_config);
     i2s_zero_dma_buffer(i2s_num);
 
-    // ES8311 Init
+    // 5. 写入 ES8311 寄存器
     Serial.println("[Audio] Configuring ES8311...");
-    writeReg(0x00, 0x1F); delay(20); writeReg(0x00, 0x00);
     for (int i = 0; i < sizeof(es8311_init_data) / 2; i++) {
         writeReg(es8311_init_data[i][0], es8311_init_data[i][1]);
+        delay(1); 
     }
     
-    setVolume(60);
+    int reg09 = readReg(0x09);
+    writeReg(0x09, reg09 & 0xBF); // DAC Unmute (播放)
+    
+    int reg0A = readReg(0x0A);
+    writeReg(0x0A, reg0A & 0xBF); // ADC Unmute (录音)
+    
+    // 再次确认音量和增益
+    setVolume(75); 
     setMicGain(0xBF); 
-    digitalWrite(PIN_PA_EN, HIGH);
 
-    // 申请内存
+    // 6. 开启功放 (加一点延时等待 Codec 稳定)
+    delay(50);
+    digitalWrite(PIN_PA_EN, HIGH); 
+
+    // 7. 内存分配
     record_buffer = (uint8_t *)ps_malloc(MAX_RECORD_SIZE);
     if (record_buffer == NULL) {
-        Serial.println("[Audio] Failed to allocate PSRAM! Trying malloc...");
         record_buffer = (uint8_t *)malloc(MAX_RECORD_SIZE);
-    } else {
-        Serial.printf("[Audio] Allocated %d bytes in PSRAM.\n", MAX_RECORD_SIZE);
     }
     
     Serial.println("[Audio] Init Done.");
@@ -114,7 +177,10 @@ void AppAudio::init() {
 void playTaskWrapper(void *param) {
     ToneParams *p = (ToneParams*)param;
     size_t bytes_written;
-    int sample_rate = 44100;
+    
+    // --- 修复: 必须与 I2S 初始化时的 sample_rate (16000) 一致 ---
+    int sample_rate = 16000; 
+    
     int samples = (sample_rate * p->duration) / 1000;
     
     int16_t chunk[1024];  
@@ -124,6 +190,7 @@ void playTaskWrapper(void *param) {
     while(total_processed < samples) {
         int to_process = (samples - total_processed) > (chunk_size/2) ? (chunk_size/2) : (samples - total_processed);
         for(int i=0; i<to_process; i++) {
+            // 生成正弦波
             int16_t val = (int16_t)(10000 * sin(2 * PI * p->freq * (total_processed + i) / sample_rate));
             chunk[i*2] = val;     // Left
             chunk[i*2+1] = val;   // Right
