@@ -75,28 +75,40 @@ void AppServer::chatWithServer() {
                     const char* action = doc["control"]["action"]; 
                     const char* value  = doc["control"]["value"];  
 
-                    // 打印调试信息，处理 NULL 情况
                     Serial.printf("[Control] Target: %s, Action: %s, Value: %s\n", 
                                   target ? target : "NULL", 
                                   action ? action : "NULL", 
                                   value ? value : "NULL");
                     
-                    // 【必须修改】在 strcmp 前先检查非空，防止 Core Panic
                     if (target != NULL) {
+                        // =========== 针对空调的控制逻辑 ===========
                         if (strcmp(target, "空调") == 0) {
-                            // 检查 action 是否为空
+                            
+                            // 1. 解析温度 (默认 26 度)
+                            int temp = 26;
+                            if (value != NULL && strlen(value) > 0) {
+                                temp = atoi(value); // 将字符串 "26" 转为整数
+                                // 简单的范围保护
+                                if (temp < 16) temp = 16;
+                                if (temp > 30) temp = 30;
+                            }
+
+                            // 2. 解析开关状态
+                            // 默认逻辑：只要有指令(比如"制冷"、"26度")，就认为是开机，除非明确说"关"
+                            bool power = true; 
+                            
                             if (action != NULL) {
-                                if (strcmp(action, "开") == 0) {
-                                    MyIR.sendNEC(0x11111111); 
-                                } else if (strcmp(action, "关") == 0) {
-                                    MyIR.sendNEC(0x22222222); 
+                                if (strcmp(action, "关") == 0) {
+                                    power = false;
                                 }
+                                // 注意：如果 action 是 "开"、"制冷"、"制热"，power 保持为 true
                             }
-                            // 检查 value 是否为空
-                            if (value != NULL && strcmp(value, "26") == 0) {
-                                MyIR.sendNEC(0x33333333); 
-                            }
+
+                            // 3. 调用你的红外控制函数
+                            Serial.printf("[Server] 执行空调指令: Power=%d, Temp=%d\n", power, temp);
+                            App_IR_Control_AC(power, (uint8_t)temp);
                         } 
+                        // =========== 针对灯的控制逻辑 (保留原来的 NEC 测试) ===========
                         else if (strcmp(target, "灯") == 0) {
                             if (action != NULL) {
                                 if (strcmp(action, "开") == 0) MyIR.sendNEC(0x44444444);
