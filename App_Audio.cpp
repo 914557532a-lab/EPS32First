@@ -1,218 +1,132 @@
 #include "App_Audio.h"
-#include <Wire.h>
-#include <math.h>
-#include "Pin_Config.h" 
-#include "driver/gpio.h"
+// #include "Pin_Config.h" // 暂时注释掉，防止引脚定义冲突，我们直接在下面写死刚才测试成功的引脚
+
+#include "AudioTools.h"
+#include "AudioBoard.h"
+
+// --- 强制使用刚才测试成功的引脚定义 (Hardcoded for Debugging) ---
+#define FORCE_I2C_SDA      47
+#define FORCE_I2C_SCL      48
+#define FORCE_I2S_MCLK     42
+#define FORCE_I2S_BCLK     41
+#define FORCE_I2S_LRCK     39
+#define FORCE_I2S_DOUT     38  // 刚才测试成功的输出引脚
+#define FORCE_I2S_DIN      40  // 刚才测试成功的输入引脚
+#define FORCE_PA_EN        18
 
 AppAudio MyAudio;
 
-// ES8311 麦克风增益枚举 (对应寄存器 0x16)
-typedef enum {
-    ES8311MIC_GAIN_0DB = 0,
-    ES8311MIC_GAIN_6DB = 1,
-    ES8311MIC_GAIN_12DB = 2,
-    ES8311MIC_GAIN_18DB = 3,
-    ES8311MIC_GAIN_24DB = 4,
-    ES8311MIC_GAIN_30DB = 5,
-    ES8311MIC_GAIN_36DB = 6,
-    ES8311MIC_GAIN_42DB = 7,
-} es8311_mic_gain_t;
+// 全局对象
+static DriverPins my_pins;
+static AudioBoard board(AudioDriverES8311, my_pins);
+static I2SStream i2s;
 
-// --- 寄存器定义 (同步自 es8311.h) ---
-#define ES8311_RESET_REG00              0x00
-#define ES8311_CLK_MANAGER_REG01        0x01
-#define ES8311_CLK_MANAGER_REG02        0x02
-#define ES8311_CLK_MANAGER_REG03        0x03
-#define ES8311_CLK_MANAGER_REG04        0x04
-#define ES8311_CLK_MANAGER_REG05        0x05
-#define ES8311_CLK_MANAGER_REG06        0x06
-#define ES8311_CLK_MANAGER_REG07        0x07
-#define ES8311_CLK_MANAGER_REG08        0x08
-#define ES8311_SDPIN_REG09              0x09
-#define ES8311_SDPOUT_REG0A             0x0A
-#define ES8311_SYSTEM_REG0D             0x0D
-#define ES8311_SYSTEM_REG0E             0x0E
-#define ES8311_SYSTEM_REG12             0x12
-#define ES8311_SYSTEM_REG13             0x13
-#define ES8311_SYSTEM_REG14             0x14
-#define ES8311_ADC_REG15                0x15
-#define ES8311_ADC_REG16                0x16
-#define ES8311_ADC_REG17                0x17
-#define ES8311_DAC_REG31                0x31
-#define ES8311_DAC_REG32                0x32
-#define ES8311_DAC_REG37                0x37
-#define ES8311_GP_REG45                 0x45
-
-// --- C 接口实现 ---
-void Audio_Play_Click() {
-    MyAudio.playToneAsync(800, 200);
-}
-
-void Audio_Record_Start() {
-    MyAudio.startRecording();
-}
-
-void Audio_Record_Stop() {
-    MyAudio.stopRecording();
-}
-
-// ------------------------------------
-
+// 播放任务参数
 struct ToneParams {
     int freq;
     int duration;
 };
 
-// ES8311 初始化配置
-// 替换原有的 es8311_init_data
-// 在 App_Audio.cpp 顶部替换这个数组
-// 修复版配置数组：
-// 1. 恢复 0x01=0x30 (解决“死寂/无声”问题，恢复时钟)
-// 2. 修改 0x09/0x0B=0x0C (解决“电流音/噪声”问题，强制 I2S Philips 格式)
-// 3. 增加 0x0E=0x02 (解决“录音为空”问题，开启 ADC 调制器)
-
-
-
-void AppAudio::init() {
-    Serial.println("[Audio] Init with ES8311 Official Logic...");
-
-    if (!Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL)) {
-        Serial.println("[Audio] ERROR: I2C Init Failed!");
-        return; 
-    }
-    
-    pinMode(PIN_PA_EN, OUTPUT);
-    digitalWrite(PIN_PA_EN, LOW); // 先关闭功放
-
-    // 强制复位 JTAG 引脚 (GPIO 39-42) 确保 I2S 信号正常
-    gpio_reset_pin((gpio_num_t)PIN_I2S_MCLK);
-    gpio_reset_pin((gpio_num_t)PIN_I2S_BCLK);
-    gpio_reset_pin((gpio_num_t)PIN_I2S_LRCK);
-    gpio_reset_pin((gpio_num_t)PIN_I2S_DOUT);
-    gpio_reset_pin((gpio_num_t)PIN_I2S_DIN);
-
-    // I2S 配置: 16kHz, 16bit, Standard I2S
-    i2s_config_t i2s_config = {
-        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_RX),
-        .sample_rate = 16000,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
-        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 8,
-        .dma_buf_len = 64,
-        .use_apll = true, // 使用 APLL 获得更精准的时钟
-        .tx_desc_auto_clear = true,
-        .fixed_mclk = 0   // 自动生成 MCLK (通常是 256 * 16k = 4.096MHz)
-    };
-
-    i2s_pin_config_t pin_config = {
-        .mck_io_num = PIN_I2S_MCLK,
-        .bck_io_num = PIN_I2S_BCLK,
-        .ws_io_num = PIN_I2S_LRCK,
-        .data_out_num = PIN_I2S_DOUT,
-        .data_in_num = PIN_I2S_DIN
-    };
-
-    if (i2s_driver_install(i2s_num, &i2s_config, 0, NULL) != ESP_OK) {
-        Serial.println("[Audio] I2S Install Failed!");
-        return;
-    }
-    i2s_set_pin(i2s_num, &pin_config);
-
-    // --- ES8311 核心初始化序列 (参考 es8311.c) ---
-    Serial.println("[Audio] Configuring ES8311 Registers...");
-    
-    // 1. 初始时钟配置
-    writeReg(ES8311_CLK_MANAGER_REG01, 0x30);
-    writeReg(ES8311_CLK_MANAGER_REG02, 0x00);
-    writeReg(ES8311_CLK_MANAGER_REG03, 0x10);
-    writeReg(ES8311_ADC_REG16, 0x24); // 初始麦克风增益
-    writeReg(ES8311_CLK_MANAGER_REG04, 0x10);
-    writeReg(ES8311_CLK_MANAGER_REG05, 0x00);
-    writeReg(0x0B, 0x00);
-    writeReg(0x0C, 0x00);
-    writeReg(0x10, 0x1F);
-    writeReg(0x11, 0x7F);
-    
-    // 2. 软件复位
-    writeReg(ES8311_RESET_REG00, 0x80); 
-    delay(5);
-    writeReg(ES8311_RESET_REG00, 0x00); // 退出复位 (Slave模式, bit6=0)
-
-    // 3. 针对 16kHz / MCLK=256Fs 的时钟精调 (参考 coeff_div 表)
-    // 对于 4.096MHz MCLK: pre_div=1, multi=1, bclk_div=4
-    writeReg(ES8311_CLK_MANAGER_REG01, 0x3F); 
-    writeReg(ES8311_CLK_MANAGER_REG02, 0x00); // pre_div=1, multi=1
-    writeReg(ES8311_CLK_MANAGER_REG05, 0x00); // adc/dac div=1
-    writeReg(ES8311_CLK_MANAGER_REG03, 0x10); // fs_mode=0, adc_osr=16
-    writeReg(ES8311_CLK_MANAGER_REG04, 0x10); // dac_osr=16
-    writeReg(ES8311_CLK_MANAGER_REG06, 0x03); // bclk_div=4 (4-1=3)
-    writeReg(ES8311_CLK_MANAGER_REG07, 0x00); // lrck_h
-    writeReg(ES8311_CLK_MANAGER_REG08, 0xFF); // lrck_l
-
-    // 4. 接口格式设置 (Standard I2S, 16bit)
-    writeReg(ES8311_SDPIN_REG09, 0x0C);  // DAC 16bit, I2S
-    writeReg(ES8311_SDPOUT_REG0A, 0x0C); // ADC 16bit, I2S
-
-    // 5. 电源管理与启动
-    writeReg(ES8311_SYSTEM_REG13, 0x10);
-    writeReg(0x1B, 0x0A);
-    writeReg(0x1C, 0x6A);
-    
-    // 启动序列 (参考 es8311_start)
-    writeReg(ES8311_ADC_REG17, 0xBF);
-    writeReg(ES8311_SYSTEM_REG0E, 0x02);
-    writeReg(ES8311_SYSTEM_REG12, 0x00);
-    writeReg(ES8311_SYSTEM_REG14, 0x1A);
-    writeReg(ES8311_SYSTEM_REG0D, 0x01);
-    writeReg(ES8311_ADC_REG15, 0x40);
-    writeReg(ES8311_DAC_REG32, 0xBF); // 默认音量
-    writeReg(ES8311_DAC_REG37, 0x48);
-    writeReg(ES8311_GP_REG45, 0x00);
-
-    setVolume(75);
-    setMicGain(ES8311MIC_GAIN_30DB); // 提升麦克风增益解决录音空的问题
-    
-    digitalWrite(PIN_PA_EN, HIGH); // 开启功放
-    
-    // 申请 PSRAM
-    record_buffer = (uint8_t *)ps_malloc(MAX_RECORD_SIZE);
-    if (!record_buffer) record_buffer = (uint8_t *)malloc(MAX_RECORD_SIZE);
-    
-    Serial.println("[Audio] Init Done with Official Logic.");
-}
-
-// ---------------- 播放功能 ----------------
-
+// 任务包装器
 void playTaskWrapper(void *param) {
     ToneParams *p = (ToneParams*)param;
-    size_t bytes_written;
+    // 使用 44100 采样率生成正弦波
+    SineWaveGenerator<int16_t> sineWave(32000); 
+    sineWave.begin(1, 44100, p->freq);
     
-    // --- 修复: 必须与 I2S 初始化时的 sample_rate (16000) 一致 ---
-    int sample_rate = 16000; 
+    // 计算需要的字节数
+    size_t samples = (44100 * p->duration) / 1000;
+    int16_t data[128];
     
-    int samples = (sample_rate * p->duration) / 1000;
-    
-    int16_t chunk[1024];  
-    int chunk_size = 1024; 
-    int total_processed = 0;
-    
-    while(total_processed < samples) {
-        int to_process = (samples - total_processed) > (chunk_size/2) ? (chunk_size/2) : (samples - total_processed);
-        for(int i=0; i<to_process; i++) {
-            // 生成正弦波
-            int16_t val = (int16_t)(10000 * sin(2 * PI * p->freq * (total_processed + i) / sample_rate));
-            chunk[i*2] = val;     // Left
-            chunk[i*2+1] = val;   // Right
-        }
-        
-        i2s_write(I2S_NUM_0, chunk, to_process * 4, &bytes_written, portMAX_DELAY);
-        total_processed += to_process;
+    for (size_t i = 0; i < samples; i += 128) {
+        // 生成数据
+        for(int j=0; j<128; j++) data[j] = sineWave.readSample();
+        // 写入 I2S
+        i2s.write((uint8_t*)data, 256);
+        // 稍微让出 CPU，防止看门狗复位
+        if(i % 1024 == 0) vTaskDelay(1);
     }
-
+    
     free(p);
     vTaskDelete(NULL); 
+}
+
+// 录音任务包装器
+void recordTaskWrapper(void *param) {
+    AppAudio *audio = (AppAudio *)param;
+    audio->_recordTask(NULL); 
+    vTaskDelete(NULL);
+}
+
+void AppAudio::init() {
+    Serial.println("\n\n=== [Audio] 正在初始化 (DEBUG模式) ===");
+
+    // 1. 配置引脚 (使用强制定义的引脚)
+    Serial.printf("[Audio] I2C Pins: SDA=%d, SCL=%d\n", FORCE_I2C_SDA, FORCE_I2C_SCL);
+    my_pins.addI2C(PinFunction::CODEC, FORCE_I2C_SCL, FORCE_I2C_SDA, 0); 
+    
+    Serial.printf("[Audio] I2S Pins: MCLK=%d, BCLK=%d, LRCK=%d, DOUT=%d, DIN=%d\n", FORCE_I2S_MCLK, FORCE_I2S_BCLK, FORCE_I2S_LRCK, FORCE_I2S_DOUT, FORCE_I2S_DIN);
+    my_pins.addI2S(PinFunction::CODEC, FORCE_I2S_MCLK, FORCE_I2S_BCLK, FORCE_I2S_LRCK, FORCE_I2S_DOUT, FORCE_I2S_DIN);
+    
+    Serial.printf("[Audio] PA Enable Pin: %d\n", FORCE_PA_EN);
+    my_pins.addPin(PinFunction::PA, FORCE_PA_EN, PinLogic::Output);
+
+    // 2. 配置 Codec (强制使用 44.1kHz，因为刚才测试这个是通过的)
+    CodecConfig cfg;
+    cfg.input_device = ADC_INPUT_LINE1; 
+    cfg.output_device = DAC_OUTPUT_ALL;
+    cfg.i2s.bits = BIT_LENGTH_16BITS;
+    cfg.i2s.rate = RATE_44K; // !!! 关键：回退到 44.1k !!!
+
+    // 3. 启动 AudioBoard
+    if (board.begin(cfg)) {
+        Serial.println("[Audio] ES8311 芯片初始化成功!");
+    } else {
+        Serial.println("[Audio] ES8311 初始化失败! 请检查 I2C 连接");
+    }
+
+    // 强制设置最大音量和增益
+    board.setVolume(80);       
+    board.setInputVolume(100); 
+
+    // 4. 配置 I2S 流 (必须与 Codec 一致: 44100)
+    auto config = i2s.defaultConfig(RXTX_MODE);
+    config.pin_bck = FORCE_I2S_BCLK;
+    config.pin_ws = FORCE_I2S_LRCK;
+    config.pin_data = FORCE_I2S_DOUT;   
+    config.pin_data_rx = FORCE_I2S_DIN; 
+    config.pin_mck = FORCE_I2S_MCLK;    
+    
+    config.sample_rate = 44100; // !!! 关键：回退到 44.1k
+    config.bits_per_sample = 16;
+    config.channels = 1; // 单声道
+    
+    if (i2s.begin(config)) {
+        Serial.println("[Audio] I2S 数据流启动成功!");
+    } else {
+        Serial.println("[Audio] I2S 启动失败!");
+    }
+
+    // 5. 内存分配
+    if (psramFound()) {
+        record_buffer = (uint8_t *)ps_malloc(MAX_RECORD_SIZE);
+        Serial.println("[Audio] 录音缓冲区已分配 (PSRAM)");
+    } else {
+        record_buffer = (uint8_t *)malloc(MAX_RECORD_SIZE);
+        Serial.println("[Audio] 录音缓冲区已分配 (SRAM)");
+    }
+
+    // --- 6. 开机自检：立即播放“滴”声 ---
+    Serial.println("[Audio] 执行开机声音自检...");
+    playToneAsync(880, 500); // 880Hz, 500ms
+}
+
+void AppAudio::setVolume(uint8_t vol) {
+    board.setVolume(vol);
+}
+
+void AppAudio::setMicGain(uint8_t gain) {
+    board.setInputVolume(gain * 10); 
 }
 
 void AppAudio::playToneAsync(int freq, int duration_ms) {
@@ -220,123 +134,81 @@ void AppAudio::playToneAsync(int freq, int duration_ms) {
     if(params) {
         params->freq = freq;
         params->duration = duration_ms;
-        xTaskCreate(playTaskWrapper, "PlayTask", 4096, params, 1, NULL);
-        Serial.println("[Audio] Play task started");
+        // 这里的 stack depth 改大一点，防止任务崩溃
+        xTaskCreate(playTaskWrapper, "PlayTask", 1024 * 6, params, 5, NULL);
     }
-}
-
-// ---------------- 录音功能 ----------------
-
-void recordTaskWrapper(void *param) {
-    AppAudio *audio = (AppAudio *)param;
-    audio->_recordTask(NULL); 
-    vTaskDelete(NULL);
-}
-
-void AppAudio::_recordTask(void *param) {
-    size_t bytes_read;
-    const int samples_per_chunk = 512;
-    int16_t i2s_read_buff[samples_per_chunk * 2]; 
-
-    while (isRecording) {
-        i2s_read(i2s_num, i2s_read_buff, sizeof(i2s_read_buff), &bytes_read, pdMS_TO_TICKS(100));
-
-        if (bytes_read > 0) {
-            int frames = bytes_read / 4; 
-
-            if (record_data_len + (frames * 2) >= MAX_RECORD_SIZE) {
-                Serial.println("[Audio] Buffer Full!");
-                isRecording = false;
-                break;
-            }
-
-            int16_t *psram_ptr = (int16_t *)(record_buffer + record_data_len);
-            
-            for (int i = 0; i < frames; i++) {
-                psram_ptr[i] = i2s_read_buff[i * 2]; 
-            }
-
-            record_data_len += (frames * 2);
-        }
-        else {
-            vTaskDelay(1);
-        }
-    }
-    
-    recordTaskHandle = NULL;
-    vTaskDelete(NULL);
 }
 
 void AppAudio::startRecording() {
-    if (isRecording) {
-        Serial.println("[Audio] Already recording...");
-        return;
-    }
-    
-    if (record_buffer != NULL) {
-        record_data_len = 44; 
-    } else {
-        Serial.println("[Audio] No buffer allocated!");
-        return;
-    }
+    if (isRecording) return;
+    if (!record_buffer) return;
 
+    record_data_len = 44; // 预留 WAV 头
     isRecording = true;
-    xTaskCreate(recordTaskWrapper, "RecTask", 4096, this, 2, &recordTaskHandle);
+    xTaskCreate(recordTaskWrapper, "RecTask", 1024 * 6, this, 10, &recordTaskHandle);
+    Serial.println("[Audio] 开始录音...");
 }
 
 void AppAudio::stopRecording() {
     isRecording = false; 
-    Serial.println("[Audio] Stopping recording...");
-    delay(50); 
+    delay(100); // 给一点时间让任务退出
+    
     uint32_t pcm_size = record_data_len - 44;
-    Serial.printf("[Audio] Stop. PCM Size: %d bytes (Mono, 16k)\n", pcm_size);
-    createWavHeader(record_buffer, pcm_size, 16000, 16, 1);
+    Serial.printf("[Audio] 录音结束, 大小: %d 字节\n", pcm_size);
+    
+    // 生成 WAV 头 (注意这里要填 44100)
+    createWavHeader(record_buffer, pcm_size, 44100, 16, 1);
+}
+
+void AppAudio::_recordTask(void *param) {
+    const size_t read_size = 512;
+    uint8_t temp_buf[read_size]; 
+
+    while (isRecording) {
+        size_t bytes_read = i2s.readBytes(temp_buf, read_size);
+        if (bytes_read > 0) {
+            // 简单增益处理 (软件放大)，如果觉得录音小可以把下面这行取消注释
+            // for(int i=0; i<bytes_read; i+=2) { int16_t* s = (int16_t*)(temp_buf+i); *s = (*s) * 4; }
+
+            if (record_data_len + bytes_read < MAX_RECORD_SIZE) {
+                memcpy(record_buffer + record_data_len, temp_buf, bytes_read);
+                record_data_len += bytes_read;
+            } else {
+                isRecording = false;
+            }
+        } else {
+            vTaskDelay(1);
+        }
+    }
+    vTaskDelete(NULL);
 }
 
 void AppAudio::playStream(WiFiClient *client, int length) {
     if (!client || length <= 0) return;
-
-    Serial.printf("[Audio] Start Playing Stream, len: %d\n", length);
-    digitalWrite(PIN_PA_EN, HIGH); 
+    Serial.printf("[Audio] 播放流媒体 (TTS), 长度: %d\n", length);
     
-    uint8_t buf[1024]; 
-    size_t bytes_written;
+    // 注意：如果是 TTS 还是 16k，用 44.1k 播放会变快像花栗鼠
+    // 这里我们先确保有声音，语速问题下一步再调
+    
+    uint8_t buf[512]; 
     int remaining = length;
     
-    if (remaining > 44) {
-        client->readBytes(buf, 44);
-        remaining -= 44;
-    }
+    // 如果是 WAV 文件带头，跳过 44 字节
+    // if (remaining > 44) { client->readBytes(buf, 44); remaining -= 44; }
 
     while (remaining > 0 && client->connected()) {
         int to_read = (remaining > sizeof(buf)) ? sizeof(buf) : remaining;
         int len = client->readBytes(buf, to_read);
-        
         if (len == 0) break;
-
-        int samples = len / 2; 
-        int16_t *pcm_samples = (int16_t*)buf;
-        
-        for (int i=0; i<samples; i++) {
-            int16_t frame[2];
-            frame[0] = pcm_samples[i];
-            frame[1] = pcm_samples[i];
-            i2s_write(i2s_num, frame, 4, &bytes_written, portMAX_DELAY);
-        }
-        
+        i2s.write(buf, len);
         remaining -= len;
     }
-    
-    uint8_t silence[128] = {0};
-    i2s_write(i2s_num, silence, 128, &bytes_written, portMAX_DELAY);
-    
-    Serial.println("[Audio] Play Done.");
+    Serial.println("[Audio] 播放结束");
 }
 
 void AppAudio::createWavHeader(uint8_t *header, uint32_t totalDataLen, uint32_t sampleRate, uint8_t sampleBits, uint8_t numChannels) {
     uint32_t byteRate = sampleRate * numChannels * (sampleBits / 8);
     uint32_t totalFileSize = totalDataLen + 44 - 8;
-    
     header[0] = 'R'; header[1] = 'I'; header[2] = 'F'; header[3] = 'F';
     header[4] = (uint8_t)(totalFileSize & 0xFF);
     header[5] = (uint8_t)((totalFileSize >> 8) & 0xFF);
@@ -345,7 +217,7 @@ void AppAudio::createWavHeader(uint8_t *header, uint32_t totalDataLen, uint32_t 
     header[8] = 'W'; header[9] = 'A'; header[10] = 'V'; header[11] = 'E';
     header[12] = 'f'; header[13] = 'm'; header[14] = 't'; header[15] = ' ';
     header[16] = 16; header[17] = 0; header[18] = 0; header[19] = 0;
-    header[20] = 1; header[21] = 0; // PCM format
+    header[20] = 1; header[21] = 0; 
     header[22] = numChannels; header[23] = 0;
     header[24] = (uint8_t)(sampleRate & 0xFF);
     header[25] = (uint8_t)((sampleRate >> 8) & 0xFF);
@@ -364,39 +236,6 @@ void AppAudio::createWavHeader(uint8_t *header, uint32_t totalDataLen, uint32_t 
     header[43] = (uint8_t)((totalDataLen >> 24) & 0xFF);
 }
 
-// ---------------- 辅助函数 ----------------
-
-void AppAudio::setVolume(uint8_t volume) {
-    if (volume > 100) volume = 100;
-    // 使用官方驱动的对数映射算法，让音量调节平滑
-    int vol_reg = 0;
-    if (volume != 0) {
-        vol_reg = (int)(255.0 * log10(9.0 * volume / 100.0 + 1.0) / log10(10.0));
-    }
-    writeReg(ES8311_DAC_REG32, vol_reg);
-}
-
-void AppAudio::setMicGain(uint8_t gain_db) {
-    // 修正：官方驱动中，录音增益主要由 REG 0x16 控制
-    // 建议传入枚举值如 ES8311MIC_GAIN_30DB (0x05)
-    writeReg(ES8311_ADC_REG16, gain_db); 
-}
-
-void AppAudio::writeReg(uint8_t reg, uint8_t data) {
-    // 保护：如果 I2C 没初始化成功（缺件），不执行写入，防止崩溃
-    // Wire.begin() 成功后会返回 true，我们在 init 里判断过了
-    // 如果要更严谨，可以加一个成员变量 _initialized 标记
-    Wire.beginTransmission(ES8311_ADDR);
-    Wire.write(reg);
-    Wire.write(data);
-    Wire.endTransmission();
-}
-
-uint8_t AppAudio::readReg(uint8_t reg) {
-    Wire.beginTransmission(ES8311_ADDR);
-    Wire.write(reg);
-    Wire.endTransmission();
-    Wire.requestFrom(ES8311_ADDR, 1);
-    if (Wire.available()) return Wire.read();
-    return 0;
-}
+void Audio_Play_Click() { MyAudio.playToneAsync(1000, 100); }
+void Audio_Record_Start() { MyAudio.startRecording(); }
+void Audio_Record_Stop() { MyAudio.stopRecording(); }

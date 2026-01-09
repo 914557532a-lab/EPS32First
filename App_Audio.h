@@ -1,16 +1,17 @@
 #ifndef APP_AUDIO_H
 #define APP_AUDIO_H
-#include <WiFi.h> // 新增
-#include <Arduino.h>
-#include <driver/i2s.h>
 
-#define ES8311_ADDR     0x18
+#include <Arduino.h>
+#include <WiFi.h>
+
+// 移除原生的 driver/i2s.h 引用，改由 AudioTools 在 cpp 中内部处理，避免冲突
+// #include <driver/i2s.h> 
 
 class AppAudio {
 public:
     void init();
     void setVolume(uint8_t vol);
-    void setMicGain(uint8_t gain);
+    void setMicGain(uint8_t gain); // 保持接口兼容，具体实现在cpp中映射
 
     // 非阻塞播放一段提示音
     void playToneAsync(int freq, int duration_ms);
@@ -21,33 +22,30 @@ public:
     // 停止录音
     void stopRecording();
 
-    // 内部任务处理函数
+    // 流式播放 (TTS)
+    void playStream(WiFiClient *client, int length);
+
+    // 内部任务处理函数 (public 以便 FreeRTOS 任务调用)
     void _playTask(void *param);
     void _recordTask(void *param);
-    void playStream(WiFiClient *client, int length);//流式播放
-    // --- 修复点：将这些变量移到 public 区域，以便外部 (UI Logic) 可以读取 ---
-    // --- 新增：录音相关变量 ---
-    uint8_t *record_buffer = NULL;       // 录音缓冲区指针
-    uint32_t record_data_len = 0;        // 当前已录制的数据长度
-    const uint32_t MAX_RECORD_SIZE = 1024 * 512; // 定义最大录音大小
+
+    // --- 录音相关变量 (保持 Public 供 UI 逻辑使用) ---
+    uint8_t *record_buffer = NULL;       
+    uint32_t record_data_len = 0;        
+    const uint32_t MAX_RECORD_SIZE = 1024 * 512; 
 
 private:
-    void writeReg(uint8_t reg, uint8_t data);
-    uint8_t readReg(uint8_t reg);
-
-    // --- 新增：WAV 头部生成辅助函数声明 ---
+    // 移除旧的 writeReg/readReg，改用 AudioBoard 库接管
+    // 辅助函数：生成 WAV 头
     void createWavHeader(uint8_t *header, uint32_t totalDataLen, uint32_t sampleRate, uint8_t sampleBits, uint8_t numChannels);
 
-    const i2s_port_t i2s_num = I2S_NUM_0;
-    
     TaskHandle_t recordTaskHandle = NULL;
     volatile bool isRecording = false;
-
-    // (原先在这里的变量已移动到 public)
 };
 
 extern AppAudio MyAudio;
 
+// C 语言桥接接口 (保持不变)
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -58,4 +56,4 @@ void Audio_Record_Stop();
 }
 #endif
 
-#endif
+#endif // APP_AUDIO_H
