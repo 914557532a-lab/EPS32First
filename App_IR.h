@@ -6,6 +6,7 @@
 #include <IRremoteESP8266.h>
 #include <IRrecv.h>
 #include <IRsend.h>
+#include <ir_Electra.h>
 #include <IRutils.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -13,6 +14,12 @@
 // 定义最大空调数据长度 (字节)
 // AUX通常是13字节(104位)，我们给大一点32字节(256位)以防万一
 #define IR_STATE_SIZE 32
+
+
+void App_IR_Test_Send(void); // 用于测试发送
+
+// 新增：专门控制空调的函数
+void App_IR_Control_AC(bool power, uint8_t temp);
 
 // 定义一个红外事件结构体
 struct IREvent {

@@ -66,7 +66,7 @@ void AppSys::scanLoop() {
         float t = getTemperatureC();
         uint32_t heap = getFreeHeap();
         g_SystemTemp = t;
-        Serial.printf("[Sys] Temp: %.1f C | Heap: %d KB\n", t, heap / 1024);
+        //Serial.printf("[Sys] Temp: %.1f C | Heap: %d KB\n", t, heap / 1024);
         
         if (t > 85.0) {
              Serial.println("[Sys] !!! OVERHEAT WARNING !!!");
