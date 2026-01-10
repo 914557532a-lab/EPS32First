@@ -288,5 +288,6 @@ void setup() {
 
 // 在 loop() 或 任务中
 void loop() {
+    My433.loop();
     vTaskDelete(NULL);
 }
