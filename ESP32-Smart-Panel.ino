@@ -252,6 +252,7 @@ void setup() {
     MyWiFi.init();
     MyWiFi.connect("HC-2G", "aa888888");
     MyServer.init("192.168.1.53", 8080);
+    My433.init();
     // 1. 创建队列
     AudioQueue_Handle = xQueueCreate(5, sizeof(AudioMsg));
     KeyQueue_Handle   = xQueueCreate(10, sizeof(KeyAction));

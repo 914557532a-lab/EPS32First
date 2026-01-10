@@ -4,7 +4,7 @@ App4G My4G;
 
 // --- 辅助函数：RTOS 专用延时 ---
 // 作用：让当前任务“睡觉”，把 CPU 让给 UI 任务
-void delay_ms(uint32_t ms) {
+static void delay_ms(uint32_t ms) {
     vTaskDelay(pdMS_TO_TICKS(ms));
 }
 
