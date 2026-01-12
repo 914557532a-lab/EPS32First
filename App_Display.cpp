@@ -24,15 +24,23 @@ void AppDisplay::my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_co
     lv_disp_flush_ready(disp); 
 }
 
+// [新增] 切换背光实现
+void AppDisplay::toggleBacklight() {
+    _backlightState = !_backlightState;
+    digitalWrite(PIN_TFT_BL, _backlightState ? HIGH : LOW);
+    Serial.printf("[Display] Backlight Toggled: %s\n", _backlightState ? "ON" : "OFF");
+}
+
 void AppDisplay::init() {
     gpio_reset_pin((gpio_num_t)3); 
-    pinMode(3, OUTPUT); // 显式设为输出
-    // 1. 创建互斥锁
+    pinMode(3, OUTPUT); 
+    
     xGuiSemaphore = xSemaphoreCreateMutex();
 
-    // 2. 硬件初始化//由于是和4G模块共用的线所以智能input模式，缺点是屏幕会闪烁，忽略这个。
+    // 初始化背光引脚
     pinMode(PIN_TFT_BL, OUTPUT);
-    digitalWrite(PIN_TFT_BL, HIGH); // 强制开启背光
+    digitalWrite(PIN_TFT_BL, HIGH); // 默认开启
+    _backlightState = true;
 
     tft.begin();
     tft.setRotation(0);
@@ -40,7 +48,6 @@ void AppDisplay::init() {
 
     lv_init();
     lv_disp_draw_buf_init(&draw_buf, buf, NULL, screenWidth * screenHeight / 10);
-
 
     static lv_disp_drv_t disp_drv;
     lv_disp_drv_init(&disp_drv);
@@ -56,15 +63,8 @@ void AppDisplay::init() {
 }
 
 void AppDisplay::loop() {
-    // 尝试获取锁
-    // 参数2: 等待时间。这里设为 portMAX_DELAY (死等)，必须拿到锁才能刷新
     if (xSemaphoreTake(xGuiSemaphore, portMAX_DELAY) == pdTRUE) {
-        
-        // --- 临界区开始 ---
         lv_timer_handler(); 
-        // --- 临界区结束 ---
-        
-        // 归还锁
         xSemaphoreGive(xGuiSemaphore);
     }
 }
