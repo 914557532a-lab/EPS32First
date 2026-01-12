@@ -102,7 +102,7 @@ void AppAudio::init() {
     
     // [优化点] Codec 内部时钟设置
     // 即使我们用 24k 播放，Codec 内部滤波器带宽设为 32k 或 48k 通常听感更好
-    cfg.i2s.rate = RATE_32K; 
+    cfg.i2s.rate = RATE_48K; 
     cfg.i2s.fmt = I2S_NORMAL; 
 
     // 4. 初始化芯片
@@ -215,29 +215,32 @@ void AppAudio::_recordTask(void *param) {
 void AppAudio::playStream(WiFiClient *client, int length) {
     if (!client || length <= 0) return;
 
-    Serial.printf("[Audio] Playing Stream: %d bytes (Soft Mode)\n", length);
+    Serial.printf("[Audio] Playing Stream: %d bytes (Direct Mode)\n", length);
     
-    // 先静音一下，消除可能的爆音
+    // 开启功放 (如果之前关了的话)
+    digitalWrite(PIN_PA_EN, HIGH); 
+    delay(10); // 稍微等待功放开启稳定
+
+    // 先写一点静音，防止刚开始的数据突变产生爆音
     writeSilence(20);
 
-    // 缓冲区
-    const int buff_size = 2048;
+    const int buff_size = 2048; // 建议加大到 4096 如果内存允许，减少网络卡顿造成的杂音
     uint8_t buff[buff_size]; 
-    int16_t stereo_buff[buff_size]; // 用于扩展立体声
+    int16_t stereo_buff[buff_size]; 
 
-    // 滤波相关变量
-    static int16_t last_sample_L = 0; 
-    float volume_scale = 0.8; // 稍微降低一点数字增益，防止爆音
+    // [优化1] 移除软件滤波变量
+    // static int16_t last_sample_L = 0; 
+    // [优化2] 移除数字缩放，使用满幅输出，提高信噪比
+    // float volume_scale = 0.8; 
 
     int remaining = length;
     
     while (remaining > 0 && client->connected()) {
-        // 计算本次读取量 (注意：不要超过 buff 大小的一半，因为我们需要扩展成立体声)
         int max_read = (remaining > (buff_size / 2)) ? (buff_size / 2) : remaining;
         
-        // 健壮的读取循环 (参考代码逻辑)
         int bytesIn = 0;
         unsigned long startWait = millis();
+        // ... (读取循环保持不变) ...
         while (bytesIn < max_read && millis() - startWait < 1000) {
              if (client->available()) {
                  bytesIn += client->read(buff + bytesIn, max_read - bytesIn);
@@ -246,34 +249,27 @@ void AppAudio::playStream(WiFiClient *client, int length) {
              }
         }
         
-        if (bytesIn == 0) break; // 读取超时或断开
+        if (bytesIn == 0) break; 
 
-        // --- 音频处理 (单声道 -> 立体声 + 滤波) ---
-        int sample_count = bytesIn / 2; // 16bit = 2bytes per sample
+        int sample_count = bytesIn / 2; 
         int16_t *pcm_samples = (int16_t*)buff;
 
         for (int i = 0; i < sample_count; i++) {
-            // 简单低通滤波 (消除 32k->24k 降速播放可能产生的高频噪声)
-            int16_t raw = pcm_samples[i];
-            int16_t filtered = (raw + last_sample_L) >> 1; 
-            last_sample_L = raw; 
-
-            // 应用音量并在 int16 范围内截断
-            int16_t val = (int16_t)(filtered * volume_scale);
+            // [优化核心] 直接透传原始数据，不要滤波，不要乘系数
+            int16_t val = pcm_samples[i];
             
-            // 填充到立体声缓冲
+            // 填充立体声
             stereo_buff[i*2]     = val; 
             stereo_buff[i*2 + 1] = val; 
         }
 
-        // 写入 I2S (字节数 = 样本数 * 2通道 * 2字节)
         i2s.write((uint8_t*)stereo_buff, sample_count * 4);
-        
         remaining -= bytesIn;
     }
     
-    // 播放结束写静音
     writeSilence(50);
+    // 播放完可以考虑关闭功放以消除待机底噪，或者保持开启避免开关爆音
+    // digitalWrite(PIN_PA_EN, LOW); 
     Serial.println("[Audio] Stream End");
 }
 
