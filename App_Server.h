@@ -3,20 +3,25 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <ArduinoJson.h> // 需要安装 ArduinoJson 库
+#include <ArduinoJson.h> 
 
 class AppServer {
 public:
-    void init(const char* ip, int port);
-    
-    // 上传录音并等待回复 (阻塞执行)
+    void init(const char* ip, uint16_t port);
     void chatWithServer();
 
 private:
-    const char* server_ip;
-    int server_port;
+    const char* _server_ip;
+    uint16_t _server_port;
+    WiFiClient client;
+
+    // [新增] 带有超时和喂狗功能的等待函数
+    bool waitForData(size_t len, uint32_t timeout_ms);
+
+    bool readBigEndianInt(uint32_t *val);
+    void sendBigEndianInt(uint32_t val);
 };
 
 extern AppServer MyServer;
 
-#endif
+#endif // APP_SERVER_H

@@ -1,146 +1,163 @@
+/**
+ * @file App_Server.cpp
+ * @brief Socket 客户端实现 - 修复看门狗复位问题
+ */
 #include "App_Server.h"
-#include "App_Audio.h"
-#include "App_IR.h" 
-#include "App_UI_Logic.h"
+#include "App_Audio.h"    
+#include "App_UI_Logic.h" 
 
 AppServer MyServer;
 
-void AppServer::init(const char* ip, int port) {
-    server_ip = ip;
-    server_port = port;
+void AppServer::init(const char* ip, uint16_t port) {
+    _server_ip = ip;
+    _server_port = port;
+    Serial.printf("[Server] Configured: %s:%d\n", _server_ip, _server_port);
+}
+
+// [修复 2] 非阻塞等待数据函数
+// 等待指定长度的数据，期间喂狗(yield)
+bool AppServer::waitForData(size_t len, uint32_t timeout_ms) {
+    unsigned long start = millis();
+    while (client.available() < len) {
+        if (millis() - start > timeout_ms) {
+            return false; // 超时
+        }
+        // 关键：给 IDLE 任务运行机会，重置看门狗
+        vTaskDelay(pdMS_TO_TICKS(10)); 
+    }
+    return true;
+}
+
+// 辅助：读取4字节大端整数
+bool AppServer::readBigEndianInt(uint32_t *val) {
+    // 先等待 4 字节数据，超时设为 5000ms
+    if (!waitForData(4, 5000)) return false;
+
+    uint8_t buf[4];
+    int readLen = client.readBytes(buf, 4);
+    if (readLen != 4) return false;
+    
+    *val = (buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3];
+    return true;
+}
+
+// 辅助：发送4字节大端整数
+void AppServer::sendBigEndianInt(uint32_t val) {
+    uint8_t buf[4];
+    buf[0] = (uint8_t)(val >> 24);
+    buf[1] = (uint8_t)(val >> 16);
+    buf[2] = (uint8_t)(val >> 8);
+    buf[3] = (uint8_t)(val);
+    client.write(buf, 4);
 }
 
 void AppServer::chatWithServer() {
-    if (MyAudio.record_data_len == 0 || MyAudio.record_buffer == NULL) {
-        Serial.println("[Server] No audio to send.");
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[Server] No WiFi!");
+        MyUILogic.updateAssistantStatus("网络断开");
         return;
     }
 
-    WiFiClient client;
-    Serial.printf("[Server] Connecting to %s:%d...\n", server_ip, server_port);
+    Serial.printf("[Server] Connecting to %s:%d...\n", _server_ip, _server_port);
+    MyUILogic.updateAssistantStatus("连接中...");
 
-    if (!client.connect(server_ip, server_port)) {
-        Serial.println("[Server] Connection failed!");
-        MyUILogic.finishAIState();
+    if (!client.connect(_server_ip, _server_port)) {
+        Serial.println("[Server] Connect Failed.");
+        MyUILogic.updateAssistantStatus("连接失败");
         return;
     }
 
-    // 1. 发送录音数据
-    Serial.println("[Server] Sending audio...");
-    client.write(MyAudio.record_buffer, MyAudio.record_data_len);
-    client.flush();
-    
-    // 2. 读取响应头：JSON 长度 (4字节大端)
-    int timeout = 10000;
-    while (client.available() < 4 && timeout > 0) {
-        delay(10);
-        timeout -= 10;
-    }
-    
-    if (client.available() < 4) {
-        Serial.println("[Server] Timeout waiting for response.");
+    // --- 1. 发送录音数据 ---
+    uint32_t audioSize = MyAudio.record_data_len;
+    uint8_t *audioData = MyAudio.record_buffer;
+
+    if (audioSize == 0 || audioData == NULL) {
+        Serial.println("[Server] No record data!");
         client.stop();
         return;
     }
 
-    uint8_t len_buf[4];
-    client.readBytes(len_buf, 4);
-    uint32_t json_len = (len_buf[0] << 24) | (len_buf[1] << 16) | (len_buf[2] << 8) | len_buf[3];
-    Serial.printf("[Server] JSON Length: %d\n", json_len);
+    Serial.printf("[Server] Sending Audio: %d bytes\n", audioSize);
+    MyUILogic.updateAssistantStatus("发送指令...");
+    
+    sendBigEndianInt(audioSize);
+    
+    const int chunkSize = 1024;
+    uint32_t sent = 0;
+    while (sent < audioSize) {
+        int toSend = (audioSize - sent) > chunkSize ? chunkSize : (audioSize - sent);
+        client.write(audioData + sent, toSend);
+        sent += toSend;
+        // 发送大文件时也稍微让一下 CPU，防止触发 TX 看门狗（虽然较少见）
+        if (sent % 10240 == 0) vTaskDelay(1); 
+    }
+    client.flush();
+    Serial.println("[Server] Sent Done. Waiting for reply...");
+    MyUILogic.updateAssistantStatus("思考中...");
 
-    // 3. 读取 JSON 内容
-    char* json_str = (char*)malloc(json_len + 1);
-    if (json_str) {
-        int read_len = client.readBytes(json_str, json_len);
-        json_str[read_len] = 0; // 结尾
-        
-        Serial.printf("[Server] JSON: %s\n", json_str);
-        
-        StaticJsonDocument<1024> doc;
-        DeserializationError error = deserializeJson(doc, json_str);
-        
-        if (!error) {
-            const char* reply = doc["reply_text"];
-            if (reply) {
-                Serial.printf("[Server] Reply: %s\n", reply); 
-            }
+    // --- 2. 接收响应 ---
+    
+    // A. 等待并读取 JSON 长度 (给予 AI 最多 15 秒思考时间)
+    // 注意：这里使用 waitForData 代替 setTimeout，避免阻塞死锁
+    uint32_t jsonLen = 0;
+    if (!readBigEndianInt(&jsonLen)) { // 内部已包含 wait
+        Serial.println("[Server] Timeout: No Reply from AI");
+        MyUILogic.updateAssistantStatus("无应答");
+        client.stop();
+        MyUILogic.finishAIState();
+        return;
+    }
+    Serial.printf("[Server] JSON Length: %d\n", jsonLen);
 
-            // --- 修复开始：安全地解析 control 指令 ---
-            if (doc.containsKey("control")) {
-                bool has_command = doc["control"]["has_command"];
-                
-                if (has_command) {
-                    // 获取指针，可能为 NULL
-                    const char* target = doc["control"]["target"]; 
-                    const char* action = doc["control"]["action"]; 
-                    const char* value  = doc["control"]["value"];  
-
-                    Serial.printf("[Control] Target: %s, Action: %s, Value: %s\n", 
-                                  target ? target : "NULL", 
-                                  action ? action : "NULL", 
-                                  value ? value : "NULL");
-                    
-                    if (target != NULL) {
-                        // =========== 针对空调的控制逻辑 ===========
-                        if (strcmp(target, "空调") == 0) {
-                            
-                            // 1. 解析温度 (默认 26 度)
-                            int temp = 26;
-                            if (value != NULL && strlen(value) > 0) {
-                                temp = atoi(value); // 将字符串 "26" 转为整数
-                                // 简单的范围保护
-                                if (temp < 16) temp = 16;
-                                if (temp > 30) temp = 30;
-                            }
-
-                            // 2. 解析开关状态
-                            // 默认逻辑：只要有指令(比如"制冷"、"26度")，就认为是开机，除非明确说"关"
-                            bool power = true; 
-                            
-                            if (action != NULL) {
-                                if (strcmp(action, "关") == 0) {
-                                    power = false;
-                                }
-                                // 注意：如果 action 是 "开"、"制冷"、"制热"，power 保持为 true
-                            }
-
-                            // 3. 调用你的红外控制函数
-                            Serial.printf("[Server] 执行空调指令: Power=%d, Temp=%d\n", power, temp);
-                            App_IR_Control_AC(power, (uint8_t)temp);
-                        } 
-                        // =========== 针对灯的控制逻辑 (保留原来的 NEC 测试) ===========
-                        else if (strcmp(target, "灯") == 0) {
-                            if (action != NULL) {
-                                if (strcmp(action, "开") == 0) MyIR.sendNEC(0x44444444);
-                                else if (strcmp(action, "关") == 0) MyIR.sendNEC(0x55555555);
-                            }
-                        }
-                    } else {
-                        Serial.println("[Server] Warning: Command received but 'target' is NULL.");
-                    }
-                }
-            }
-            // --- 修复结束 ---
-
-        } else {
-            Serial.print("[Server] JSON Deserialize Error: ");
-            Serial.println(error.c_str());
+    // B. 读取 JSON 内容
+    if (jsonLen > 0) {
+        // 等待数据到齐
+        if (!waitForData(jsonLen, 3000)) {
+            Serial.println("[Server] Err: JSON data incomplete");
+            client.stop();
+            MyUILogic.finishAIState();
+            return;
         }
-        free(json_str);
+
+        char *jsonBuf = (char*)malloc(jsonLen + 1);
+        if (jsonBuf) {
+            client.readBytes(jsonBuf, jsonLen);
+            jsonBuf[jsonLen] = 0; 
+            Serial.printf("[Server] JSON: %s\n", jsonBuf);
+            
+            // UI 更新
+            DynamicJsonDocument doc(2048);
+            DeserializationError error = deserializeJson(doc, jsonBuf);
+            if (!error) {
+                const char* reply = doc["reply_text"];
+                if (reply) MyUILogic.showReplyText(reply);
+                
+                // 处理指令
+                MyUILogic.handleAICommand(String(jsonBuf)); // 传入完整 JSON 字符串给 Logic 处理
+            }
+            free(jsonBuf);
+        }
     }
 
-    // 4. 读取音频长度
-    while (client.available() < 4) delay(1);
-    client.readBytes(len_buf, 4);
-    uint32_t audio_len = (len_buf[0] << 24) | (len_buf[1] << 16) | (len_buf[2] << 8) | len_buf[3];
-    Serial.printf("[Server] Audio Length: %d\n", audio_len);
-
-    // 5. 播放音频流
-    if (audio_len > 0) {
-        MyAudio.playStream(&client, audio_len);
+    // C. 读取 音频 长度
+    uint32_t pcmLen = 0;
+    if (!readBigEndianInt(&pcmLen)) {
+        Serial.println("[Server] Err: Failed to read PCM len");
+        client.stop();
+        MyUILogic.finishAIState();
+        return;
     }
-    Serial.println("[Server] Playback finished. Restoring UI.");
-    MyUILogic.finishAIState(); 
+    Serial.printf("[Server] PCM Length: %d\n", pcmLen);
+
+    // D. 播放音频
+    if (pcmLen > 0) {
+        MyUILogic.updateAssistantStatus("回复中...");
+        // playStream 内部有 while client.connected() 循环
+        // 请确保 playStream 里也有 yield 或 vTaskDelay (之前的代码里已经有了)
+        MyAudio.playStream(&client, pcmLen);
+    }
+
+    Serial.println("[Server] Transaction Complete.");
     client.stop();
-    Serial.println("[Server] Transaction Done.");
+    MyUILogic.finishAIState();
 }

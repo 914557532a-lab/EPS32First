@@ -15,7 +15,6 @@
 #include "App_WiFi.h"
 #include "App_4G.h"
 #include "App_IR.h"
-#include "App_433.h"
 #include "App_Server.h"
 
 volatile float g_SystemTemp = 0.0f;
@@ -130,15 +129,6 @@ void TaskIR_Code(void *pvParameters) {
 }
 
 // ================= [Core 0] Task433 =================
-void Task433_Code(void *pvParameters) {
-    vTaskDelay(pdMS_TO_TICKS(500)); 
-    My433.init();
-    
-    for(;;) {
-        My433.loop();
-        vTaskDelay(pdMS_TO_TICKS(5)); // 提高响应速度
-    }
-}
 
 // ================= Setup =================
 void setup() {
@@ -154,8 +144,7 @@ void setup() {
     xTaskCreatePinnedToCore(TaskAudio_Code, "Audio",   4096, NULL, 4, &TaskAudio_Handle, 0);
     xTaskCreatePinnedToCore(TaskNet_Code,   "Net",     8192, NULL, 1, &TaskNet_Handle,   0);
     xTaskCreatePinnedToCore(TaskIR_Code,    "IR",      4096, NULL, 1, &TaskIR_Handle,    0);
-    xTaskCreatePinnedToCore(Task433_Code,   "433",     4096, NULL, 1, &Task433_Handle,   0);
-    
+
     xTaskCreatePinnedToCore(TaskUI_Code,    "UI",      32768, NULL, 3, &TaskUI_Handle, 1);
     xTaskCreatePinnedToCore(TaskSys_Code,   "Sys",     4096, NULL, 2, &TaskSys_Handle,   1);
 

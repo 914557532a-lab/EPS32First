@@ -1,17 +1,27 @@
+/**
+ * @file App_Audio.h
+ * @brief 音频控制头文件 - 集成 APLL 和 滤波优化
+ */
 #ifndef APP_AUDIO_H
 #define APP_AUDIO_H
 
 #include <Arduino.h>
 #include <WiFi.h>
 
-// 移除原生的 driver/i2s.h 引用，改由 AudioTools 在 cpp 中内部处理，避免冲突
+// 移除原生的 driver/i2s.h 引用，改由 AudioTools 内部处理
 // #include <driver/i2s.h> 
+
+// ================= 音频核心配置 =================
+// 原始 TTS 数据通常是 16k 或 32k。
+// 设置为 24000 可以适当放慢语速，压低声调，听起来更自然。
+// 同时用于录音采样率。
+#define AUDIO_SAMPLE_RATE  24000 
 
 class AppAudio {
 public:
     void init();
     void setVolume(uint8_t vol);
-    void setMicGain(uint8_t gain); // 保持接口兼容，具体实现在cpp中映射
+    void setMicGain(uint8_t gain);
 
     // 非阻塞播放一段提示音
     void playToneAsync(int freq, int duration_ms);
@@ -22,21 +32,18 @@ public:
     // 停止录音
     void stopRecording();
 
-    // 流式播放 (TTS)
+    // 流式播放 (TTS) - 经过优化
     void playStream(WiFiClient *client, int length);
 
     // 内部任务处理函数 (public 以便 FreeRTOS 任务调用)
-    void _playTask(void *param);
     void _recordTask(void *param);
 
-    // --- 录音相关变量 (保持 Public 供 UI 逻辑使用) ---
+    // --- 录音相关变量 ---
     uint8_t *record_buffer = NULL;       
     uint32_t record_data_len = 0;        
     const uint32_t MAX_RECORD_SIZE = 1024 * 512; 
 
 private:
-    // 移除旧的 writeReg/readReg，改用 AudioBoard 库接管
-    // 辅助函数：生成 WAV 头
     void createWavHeader(uint8_t *header, uint32_t totalDataLen, uint32_t sampleRate, uint8_t sampleBits, uint8_t numChannels);
 
     TaskHandle_t recordTaskHandle = NULL;
@@ -45,7 +52,7 @@ private:
 
 extern AppAudio MyAudio;
 
-// C 语言桥接接口 (保持不变)
+// C 语言桥接接口
 #ifdef __cplusplus
 extern "C" {
 #endif
