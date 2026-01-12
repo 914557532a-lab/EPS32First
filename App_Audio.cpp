@@ -1,6 +1,6 @@
 /**
  * @file App_Audio.cpp
- * @brief 音频实现 - 移植了高音质优化算法 (APLL + SoftFilter)
+ * @brief 音频实现 - 移植了高音质优化算法 (APLL + SoftFilter) + 底噪修复
  */
 #include "App_Audio.h"
 #include "Pin_Config.h" // 务必包含此文件以获取正确的引脚定义
@@ -34,10 +34,14 @@ void writeSilence(int ms) {
     }
 }
 
-// 任务包装函数：播放提示音
+// 任务包装函数：播放提示音 (已修正：增加功放开关逻辑)
 void playTaskWrapper(void *param) {
     ToneParams *p = (ToneParams*)param;
     
+    // [新增] 播放前打开功放
+    digitalWrite(PIN_PA_EN, HIGH);
+    delay(20); // 给功放一点启动时间，防止瞬态“啪”声
+
     // 使用全局定义的采样率
     const int sample_rate = AUDIO_SAMPLE_RATE;
     const int amplitude = 10000; 
@@ -65,6 +69,9 @@ void playTaskWrapper(void *param) {
     // 播放结束写一点静音防止爆破音
     writeSilence(20);
 
+    // [新增] 播放结束后立刻关闭功放，消除底噪
+    digitalWrite(PIN_PA_EN, LOW);
+
     free(p);
     vTaskDelete(NULL); 
 }
@@ -82,9 +89,9 @@ void recordTaskWrapper(void *param) {
 void AppAudio::init() {
     Serial.println("[Audio] Init Start (High Quality Mode)...");
 
-    // 1. 强制拉高 PA_EN (GPIO 18)
+    // 1. 配置 PA_EN 引脚，默认拉低 (关闭功放)，消除待机底噪
     pinMode(PIN_PA_EN, OUTPUT);
-    digitalWrite(PIN_PA_EN, HIGH);
+    digitalWrite(PIN_PA_EN, LOW); 
 
     // 2. 配置 DriverPins (严格使用 Pin_Config.h 中的定义)
     // I2C: SDA=47, SCL=48
@@ -113,8 +120,8 @@ void AppAudio::init() {
     }
 
     // 5. 设置音量
-    board.setVolume(60);       
-    board.setInputVolume(85); 
+    board.setVolume(35);       
+    board.setInputVolume(0); 
 
     // 6. 配置 I2S 数据流 (关键优化)
     auto config = i2s.defaultConfig(RXTX_MODE); 
@@ -159,6 +166,7 @@ void AppAudio::setMicGain(uint8_t gain) {
     board.setInputVolume(gain);
 }
 
+// [重要：补回丢失的函数]
 void AppAudio::playToneAsync(int freq, int duration_ms) {
     ToneParams *params = (ToneParams*)malloc(sizeof(ToneParams));
     if(params) {
@@ -172,7 +180,10 @@ void AppAudio::startRecording() {
     if (isRecording) return;
     if (!record_buffer) return;
 
-    record_data_len = 44; // 预留44字节WAV头
+    // [新增] 开始录音时，才开启麦克风增益
+    board.setInputVolume(85); 
+
+    record_data_len = 44; 
     isRecording = true;
     
     // 录音任务
@@ -183,11 +194,13 @@ void AppAudio::startRecording() {
 void AppAudio::stopRecording() {
     isRecording = false; 
     delay(100); 
+
+    // [新增] 录音结束，立刻静音麦克风，防止底噪
+    board.setInputVolume(0); 
     
     uint32_t pcm_size = record_data_len - 44;
     Serial.printf("[Audio] Record Stop. Size: %d\n", pcm_size);
     
-    // 使用全局采样率生成 WAV 头
     createWavHeader(record_buffer, pcm_size, AUDIO_SAMPLE_RATE, 16, 2);
 }
 
@@ -217,9 +230,9 @@ void AppAudio::playStream(WiFiClient *client, int length) {
 
     Serial.printf("[Audio] Playing Stream: %d bytes (Direct Mode)\n", length);
     
-    // 开启功放 (如果之前关了的话)
+    // 1. 开启功放
     digitalWrite(PIN_PA_EN, HIGH); 
-    delay(10); // 稍微等待功放开启稳定
+    delay(20); // [优化] 稍微增加延时等待功放开启稳定
 
     // 先写一点静音，防止刚开始的数据突变产生爆音
     writeSilence(20);
@@ -228,11 +241,6 @@ void AppAudio::playStream(WiFiClient *client, int length) {
     uint8_t buff[buff_size]; 
     int16_t stereo_buff[buff_size]; 
 
-    // [优化1] 移除软件滤波变量
-    // static int16_t last_sample_L = 0; 
-    // [优化2] 移除数字缩放，使用满幅输出，提高信噪比
-    // float volume_scale = 0.8; 
-
     int remaining = length;
     
     while (remaining > 0 && client->connected()) {
@@ -240,7 +248,7 @@ void AppAudio::playStream(WiFiClient *client, int length) {
         
         int bytesIn = 0;
         unsigned long startWait = millis();
-        // ... (读取循环保持不变) ...
+        // ... (读取循环) ...
         while (bytesIn < max_read && millis() - startWait < 1000) {
              if (client->available()) {
                  bytesIn += client->read(buff + bytesIn, max_read - bytesIn);
@@ -268,8 +276,10 @@ void AppAudio::playStream(WiFiClient *client, int length) {
     }
     
     writeSilence(50);
-    // 播放完可以考虑关闭功放以消除待机底噪，或者保持开启避免开关爆音
-    // digitalWrite(PIN_PA_EN, LOW); 
+    
+    // [重要修改] 播放完强制关闭功放，彻底消除待机底噪
+    digitalWrite(PIN_PA_EN, LOW); 
+    
     Serial.println("[Audio] Stream End");
 }
 

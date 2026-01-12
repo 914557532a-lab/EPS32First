@@ -135,7 +135,6 @@ void setup() {
     Serial.begin(115200);
     delay(2000); 
     Serial.println("\n\n>>> ESP32 Smart Panel Booting... <<<");
-
     AudioQueue_Handle = xQueueCreate(5, sizeof(AudioMsg));
     KeyQueue_Handle   = xQueueCreate(10, sizeof(KeyAction));
     IRQueue_Handle    = xQueueCreate(5,  sizeof(IREvent)); 
