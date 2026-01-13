@@ -1,20 +1,13 @@
 /**
  * @file App_Audio.h
- * @brief 音频控制头文件 - 集成 APLL 和 滤波优化
+ * @brief 音频控制头文件
  */
 #ifndef APP_AUDIO_H
 #define APP_AUDIO_H
 
 #include <Arduino.h>
-#include <WiFi.h>
+#include <WiFi.h> // 需要引用以支持 Client (或者 <Client.h>)
 
-// 移除原生的 driver/i2s.h 引用，改由 AudioTools 内部处理
-// #include <driver/i2s.h> 
-
-// ================= 音频核心配置 =================
-// 原始 TTS 数据通常是 16k 或 32k。
-// 设置为 24000 可以适当放慢语速，压低声调，听起来更自然。
-// 同时用于录音采样率。
 #define AUDIO_SAMPLE_RATE  24000 
 
 class AppAudio {
@@ -23,22 +16,19 @@ public:
     void setVolume(uint8_t vol);
     void setMicGain(uint8_t gain);
 
-    // 非阻塞播放一段提示音
+    // 播放提示音
     void playToneAsync(int freq, int duration_ms);
 
-    // 开始录音
+    // 录音控制
     void startRecording();
-
-    // 停止录音
     void stopRecording();
 
-    // 流式播放 (TTS) - 经过优化
-    void playStream(WiFiClient *client, int length);
+    // [重要修改] 统一参数名为 client 和 length，类型为 Client* (兼容 WiFi 和 4G)
+    void playStream(Client* client, int length);
 
-    // 内部任务处理函数 (public 以便 FreeRTOS 任务调用)
+    // 内部任务
     void _recordTask(void *param);
 
-    // --- 录音相关变量 ---
     uint8_t *record_buffer = NULL;       
     uint32_t record_data_len = 0;        
     const uint32_t MAX_RECORD_SIZE = 1024 * 512; 
@@ -52,7 +42,7 @@ private:
 
 extern AppAudio MyAudio;
 
-// C 语言桥接接口
+// C 语言桥接
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -63,4 +53,4 @@ void Audio_Record_Stop();
 }
 #endif
 
-#endif // APP_AUDIO_H
+#endif

@@ -89,30 +89,86 @@ void TaskAudio_Code(void *pvParameters) {
 }
 
 // ================= [Core 0] TaskNet =================
+// 负责网络连接维持 (WiFi/4G) 和 数据上传下载
 void TaskNet_Code(void *pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(1000));
+    
+    // 1. 初始化 WiFi
     MyWiFi.init();
-    MyWiFi.connect("HC-2G", "aa888888"); 
+    MyWiFi.connect("HC-2G", "aa888888"); // 你的WiFi账号密码
+    
+    // 2. 初始化 4G (执行开机，但不立即拨号，省流)
+    My4G.init();
+    My4G.powerOn(); 
+    
+    // 3. 配置服务器信息
     MyServer.init("192.168.1.53", 8080);
+    
+    // 定义 WiFi 客户端实例
+    WiFiClient wifiClient; 
+    
     NetMessage msg;
 
     for(;;) {
-        if (xQueueReceive(NetQueue_Handle, &msg, pdMS_TO_TICKS(100)) == pdTRUE) {
+        // --- 1. 处理消息队列 (上传录音等) ---
+        // 等待时间设短一点(50ms)，保证循环能快速进入下方的网络维护逻辑
+        if (xQueueReceive(NetQueue_Handle, &msg, pdMS_TO_TICKS(50)) == pdTRUE) {
+            
             if (msg.type == NET_EVENT_UPLOAD_AUDIO) {
-                Serial.println("[Net] Upload Request...");
+                Serial.println("[Net] Upload Request Received.");
+                
+                Client* activeClient = NULL;
+                
+                // ========= [核心逻辑] 网络选择策略 =========
+                
+                // 优先级 A: 检查 WiFi
                 if (MyWiFi.isConnected()) {
-                    MyServer.chatWithServer();
+                    Serial.println("[Net] Strategy: WiFi is good. Using WiFi.");
+                    activeClient = &wifiClient;
+                } 
+                // 优先级 B: WiFi 不通，检查 4G
+                else {
+                    Serial.println("[Net] WiFi lost! Switching to 4G...");
+                    MyUILogic.updateAssistantStatus("切换4G...");
+                    
+                    // 如果 4G 还没联网，现场拨号
+                    if (!My4G.isConnected()) {
+                        Serial.println("[Net] 4G dialing...");
+                        My4G.connect();
+                    }
+                    
+                    if (My4G.isConnected()) {
+                        Serial.println("[Net] Strategy: 4G LTE is ready. Using 4G.");
+                        activeClient = &My4G.getClient();
+                    }
+                }
+
+                // ========= 执行通信 =========
+                if (activeClient != NULL) {
+                    // 传入选定的 Client (WiFi 或 4G)
+                    MyServer.chatWithServer(activeClient);
                 } else {
-                    Serial.println("[Net] WiFi Disconnected.");
+                    Serial.println("[Net] Error: All networks failed!");
+                    MyUILogic.updateAssistantStatus("无网络");
                     MyUILogic.finishAIState();
                 }
             }
-            if (msg.data != NULL) { free(msg.data); msg.data = NULL; }
+            
+            // 释放消息内存
+            if (msg.data != NULL) { 
+                free(msg.data);
+                msg.data = NULL; 
+            }
         }
+
+        // --- 2. 周期性网络维护 (每 5 秒) ---
         static uint32_t lastCheck = 0;
         if (millis() - lastCheck > 5000) {
             lastCheck = millis();
+            
+            // 即使在用 4G，后台也尝试重连 WiFi (为了省流量，WiFi 恢复后下次会自动切回)
             if (!MyWiFi.isConnected()) {
+                 // Serial.println("[Net] Background: Retrying WiFi...");
                  MyWiFi.connect("HC-2G", "aa888888");
             }
         }
