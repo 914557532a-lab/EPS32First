@@ -8,59 +8,39 @@ App4G My4G;
 void App4G::init() {
     // 1. 初始化电源引脚
     pinMode(PIN_4G_PWR, OUTPUT);
-    digitalWrite(PIN_4G_PWR, LOW); // 先保持断电
+    digitalWrite(PIN_4G_PWR, LOW); // 默认断电
 
-    // 2. 初始化 PWRKEY (关键修改！)
-    // 硬件接了 1K 下拉电阻(GND)，导致默认是 LOW (一直按着的状态)。
-    // LE270-EU 需要我们主动拉高(HIGH)来"释放"按键，否则它会关机或不启动。
-    pinMode(PIN_4G_PWRKEY, OUTPUT);
-    digitalWrite(PIN_4G_PWRKEY, HIGH); // 强制拉高，对抗硬件下拉，模拟"松开按键"
+    // 2. 初始化 PWRKEY - 【修改点】
+    // 硬件接了 1K 下拉电阻(GND)，设计意图是"上电自启"。
+    // 我们将其设为 INPUT (高阻态)，让硬件电阻发挥作用，保持为 LOW。
+    // 不要输出 HIGH，否则会由于破坏了上电时的低电平条件而导致自启失败。
+    pinMode(PIN_4G_PWRKEY, INPUT); 
 
     // 3. 处理背光冲突 (GPIO14)
-    // 设为输入，把控制权交给 4G 模块的 NetLight
     pinMode(PIN_4G_NET, INPUT); 
 
     // 4. 初始化串口
-    // 如果之后灯亮了但 AT 依然不通，请在这里互换 PIN_4G_RX 和 PIN_4G_TX
     _serial4G->begin(115200, SERIAL_8N1, PIN_4G_RX, PIN_4G_TX);
 
-    Serial.println("[4G] GPIO Init: PWRKEY set to HIGH (Released).");
+    Serial.println("[4G] GPIO Init: PWRKEY set to INPUT (Using Hardware Auto-Start).");
 }
 
 void App4G::powerOn() {
-    Serial.println("[4G] Starting LE270-EU Power Sequence...");
+    Serial.println("[4G] Starting LE270-EU Power Sequence (Auto-Start mode)...");
 
-    // 步骤 1: 确保 PWRKEY 是释放状态 (High)
-    digitalWrite(PIN_4G_PWRKEY, HIGH);
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    // 步骤 2: 打开主电源 (GPIO45)
+    // 步骤 1: 只要打开主电源，因为 PWRKEY 已经被硬件拉低，模块应自动开机
     Serial.println("[4G] Main Power ON (GPIO45 -> HIGH)");
     digitalWrite(PIN_4G_PWR, HIGH);
     
-    // 等待电压稳定 (给足 1秒)
-    vTaskDelay(pdMS_TO_TICKS(1000)); 
-
-    // 步骤 3: 发送开机脉冲 (拉低 PWRKEY)
-    Serial.println("[4G] Pressing PWRKEY (2s)...");
-    digitalWrite(PIN_4G_PWRKEY, LOW);  // 拉低 (模拟按下)
-    vTaskDelay(pdMS_TO_TICKS(2000));   // 保持 2秒 (LE270 通常需要 >1.5s)
-    
-    // 步骤 4: 释放 PWRKEY (恢复高电平)
-    // 这一步至关重要！如果不拉高，模块会以为按键没松开，从而关机。
-    Serial.println("[4G] Releasing PWRKEY...");
-    digitalWrite(PIN_4G_PWRKEY, HIGH); // 拉高 (模拟松开)
-
-    // 步骤 5: 等待模组启动
-    Serial.println("[4G] Waiting for boot (8s)...");
-    // 此时请观察 GPIO14 (屏幕背光) 是否开始闪烁
-    for(int i=0; i<8; i++) {
+    // 步骤 2: 等待模组启动 (给予更长的缓冲时间)
+    Serial.println("[4G] Waiting for boot (10s)...");
+    for(int i=0; i<10; i++) {
         Serial.printf(" %d", i+1);
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
     Serial.println();
 
-    // 步骤 6: 初始化 TinyGSM
+    // 步骤 3: 初始化 TinyGSM
     if (_modem == nullptr) {
         _modem = new TinyGsm(*_serial4G);
     }
@@ -68,22 +48,35 @@ void App4G::powerOn() {
         _client = new TinyGsmClient(*_modem);
     }
 
-    // 步骤 7: AT 握手测试
+    // 步骤 4: AT 握手测试
     Serial.println("[4G] Sending AT...");
     bool alive = false;
-    for(int i=0; i<10; i++) {
+    // 尝试多次握手
+    for(int i=0; i<20; i++) {
         if (_modem->testAT(500)) { 
             alive = true;
             Serial.println("\n[4G] Module Response: OK! (Boot Success)");
             break;
         }
         Serial.print(".");
+        // 如果自动开机失败，这里可以作为补救措施：尝试手动拉低一下 PWRKEY
+        // 但大概率不需要
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
     if (!alive) {
         Serial.println("\n[4G] No Response.");
-        Serial.println("Checklist: 1. Did the LED flash? 2. Try swapping RX/TX.");
+        Serial.println("Try: Check if GPIO45 actually outputs High (Voltage).");
+        
+        // 补救措施，如果自动启动失败，尝试手动脉冲
+        Serial.println("[4G] Auto-start failed. Trying manual pulse...");
+        pinMode(PIN_4G_PWRKEY, OUTPUT);
+        digitalWrite(PIN_4G_PWRKEY, HIGH); // 先释放
+        delay(100);
+        digitalWrite(PIN_4G_PWRKEY, LOW);  // 按下
+        delay(2500);                       // 长按2.5秒
+        digitalWrite(PIN_4G_PWRKEY, HIGH); // 释放
+        pinMode(PIN_4G_PWRKEY, INPUT);     // 恢复输入状态
     } else {
         String imei = getIMEI();
         Serial.println("[4G] IMEI: " + imei);
