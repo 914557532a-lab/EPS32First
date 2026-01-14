@@ -1,6 +1,3 @@
-/**
- * @file App_4G.h
- */
 #ifndef APP_4G_H
 #define APP_4G_H
 
@@ -9,48 +6,37 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-// =========================================================
-//  配置 TinyGSM 适配的模组型号
-//  Fibocom LE270-EU / L610 系列通常兼容 SIM7600 指令集
-// =========================================================
 #define TINY_GSM_MODEM_SIM7600 
+#define TINY_GSM_DEBUG Serial 
 
 #include <TinyGsmClient.h>
 
 class App4G {
 public:
-    // 初始化引脚和串口，不进行耗时操作
     void init(); 
-    
-    // 4G 模块开机时序 (包含上电、拉PWRKEY、等待握手)，耗时操作
     void powerOn();
-    
-    // [修改] 拨号连接移动网络，增加超时参数(默认15秒)
-    bool connect(unsigned long timeout_ms = 15000L); 
-    
-    // 检查网络是否连接 (GPRS/LTE 是否就绪)
+    bool connect(unsigned long timeout_ms = 30000L); 
     bool isConnected();
-
-    // 获取模块 IMEI
     String getIMEI();
-
-    // 获取 Client 实例，用于传递给 App_Server 进行网络通信
     TinyGsmClient& getClient(); 
-
-    // [新增] 发送原始 AT 指令用于测试
     void sendRawAT(String cmd);
+    int getSignalCSQ();
 
 private:
-    // 硬件串口指针 (指向 Serial2)
     HardwareSerial* _serial4G = &Serial2; 
-    
-    // TinyGSM 核心对象指针
     TinyGsm* _modem = nullptr;
     TinyGsmClient* _client = nullptr;
 
-    String _apn = "cmnet"; 
+    String _apn = "cmiot"; 
     String _user = "";
     String _pass = "";
+
+    // [新增] 验证标志：确保 connect() 至少完整运行过一次
+    bool _is_verified = false;
+
+    bool checkIP_manual();  
+    bool ensureNetOpen();   
+    void checkDNS();        
 };
 
 extern App4G My4G;

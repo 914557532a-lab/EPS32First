@@ -62,7 +62,6 @@ void AppSys::scanLoop() {
     if (millis() - lastLogTime > 3000) {
         lastLogTime = millis();
         
-        // 这里直接调用刚刚升级过的 getTemperatureC
         float t = getTemperatureC();
         uint32_t heap = getFreeHeap();
         g_SystemTemp = t;

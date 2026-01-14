@@ -1,6 +1,6 @@
 #include "App_UI_Logic.h"
 #include "App_Display.h" 
-#include "App_4G.h"      
+//#include "App_4G.h"      
 #include "App_Audio.h"   
 #include "App_WiFi.h"    
 #include <time.h> 
@@ -8,6 +8,12 @@
 #include "App_Sys.h"
 
 AppUILogic MyUILogic;
+
+
+// [新增] 设置信号值
+void AppUILogic::setSignalCSQ(int csq) {
+    _cachedCSQ = csq;
+}
 
 // --- [核心修复] 适配新的 JSON 结构并防止空指针崩溃 ---
 void AppUILogic::handleAICommand(String jsonString) {
@@ -183,10 +189,23 @@ void AppUILogic::showReplyText(const char* text) {
     }
 }
 
+// 注意这里是 AppUILogic
 void AppUILogic::updateStatusBar() {
     if (xSemaphoreTake(xGuiSemaphore, 0) == pdTRUE) {
         if (lv_scr_act() == ui_MainScreen && ui_MainScreen != NULL) {
-            if (ui_Bar4gsignal) lv_bar_set_value(ui_Bar4gsignal, 75, LV_ANIM_ON);
+            
+            // 使用缓存的 _cachedCSQ
+            int signalPercent = 0;
+            if (_cachedCSQ > 0 && _cachedCSQ != 99) {
+                signalPercent = map(_cachedCSQ, 0, 31, 0, 100);
+                if (signalPercent > 100) signalPercent = 100;
+            }
+            
+            if (ui_Bar4gsignal) {
+                lv_bar_set_value(ui_Bar4gsignal, signalPercent, LV_ANIM_ON);
+            }
+
+            // 更新时间
             if (ui_LabelTime) {
                 struct tm timeinfo;
                 if (getLocalTime(&timeinfo, 0)) { 
