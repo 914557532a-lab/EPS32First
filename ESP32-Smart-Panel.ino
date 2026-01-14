@@ -15,7 +15,6 @@
 #include "App_4G.h"
 #include "App_IR.h"
 #include "App_Server.h"
-// [新增] 包含 433 头文件
 #include "App_433.h"
 
 volatile float g_SystemTemp = 0.0f;
@@ -92,84 +91,97 @@ void TaskAudio_Code(void *pvParameters) {
 // 负责网络连接维持 (WiFi/4G) 和 数据上传下载
 void TaskNet_Code(void *pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(1000));
-    
     // 1. 初始化 WiFi
     MyWiFi.init();
-    MyWiFi.connect("HC-2G", "aa888888"); // 你的WiFi账号密码
+    MyWiFi.connect("HC-2G", "aa888888");
     
-    // 2. 初始化 4G (执行开机，但不立即拨号，省流)
+    // 2. 初始化 4G
     My4G.init();
-    My4G.powerOn(); 
+    My4G.powerOn(); // 开机
     
-    // 3. 配置服务器信息
     MyServer.init("192.168.1.53", 8080);
     
-    // 定义 WiFi 客户端实例
     WiFiClient wifiClient; 
-    
     NetMessage msg;
 
     for(;;) {
-        // --- 1. 处理消息队列 (上传录音等) ---
-        // 等待时间设短一点(50ms)，保证循环能快速进入下方的网络维护逻辑
-        if (xQueueReceive(NetQueue_Handle, &msg, pdMS_TO_TICKS(50)) == pdTRUE) {
+        // --- [新增] 串口 AT 指令监听 ---
+        // 允许用户在串口监视器输入 "AT+..." 进行测试
+        if (Serial.available()) {
+            String input = Serial.readStringUntil('\n');
+            input.trim();
+            if (input.length() > 0) {
+                // 如果是 AT 开头的指令，或者用户想强制发其他指令
+                My4G.sendRawAT(input);
+            }
+        }
+
+        // --- 1. 处理消息队列 ---
+        // 将等待时间设为 20ms，保证能快速回到上方响应串口 AT 指令
+        if (xQueueReceive(NetQueue_Handle, &msg, pdMS_TO_TICKS(20)) == pdTRUE) {
             
             if (msg.type == NET_EVENT_UPLOAD_AUDIO) {
                 Serial.println("[Net] Upload Request Received.");
-                
                 Client* activeClient = NULL;
                 
-                // ========= [核心逻辑] 网络选择策略 =========
-                
-                // 优先级 A: 检查 WiFi
+                // 优先级 A: WiFi
                 if (MyWiFi.isConnected()) {
-                    Serial.println("[Net] Strategy: WiFi is good. Using WiFi.");
+                    Serial.println("[Net] Using WiFi.");
                     activeClient = &wifiClient;
                 } 
-                // 优先级 B: WiFi 不通，检查 4G
+                // 优先级 B: 4G
                 else {
                     Serial.println("[Net] WiFi lost! Switching to 4G...");
-                    MyUILogic.updateAssistantStatus("切换4G...");
+                    MyUILogic.updateAssistantStatus("正在切换4G...");
                     
-                    // 如果 4G 还没联网，现场拨号
+                    // 如果 4G 未连接，尝试连接
                     if (!My4G.isConnected()) {
                         Serial.println("[Net] 4G dialing...");
-                        My4G.connect();
+                        
+                        // [修改] 使用 10秒 超时，避免长时间卡死
+                        // 如果 10秒 连不上，本次请求失败，但不会导致 UI 死机
+                        if (My4G.connect(10000L)) { 
+                             // 连接成功
+                        } else {
+                             Serial.println("[Net] 4G Connect Timeout!");
+                             MyUILogic.updateAssistantStatus("网络连接失败");
+                        }
                     }
                     
                     if (My4G.isConnected()) {
-                        Serial.println("[Net] Strategy: 4G LTE is ready. Using 4G.");
+                        Serial.println("[Net] Using 4G.");
                         activeClient = &My4G.getClient();
                     }
                 }
 
-                // ========= 执行通信 =========
+                if (activeClient != NULL && activeClient->connected() == false) {
+                     // 再次确认连接状态，防止空指针
+                     if(!activeClient->connect("192.168.1.53", 8080)) { 
+                         // 这里只是示例，实际上 TinyGSM Client 连接在 connect() 里已经处理
+                     }
+                }
+
                 if (activeClient != NULL) {
-                    // 传入选定的 Client (WiFi 或 4G)
                     MyServer.chatWithServer(activeClient);
                 } else {
-                    Serial.println("[Net] Error: All networks failed!");
-                    MyUILogic.updateAssistantStatus("无网络");
+                    Serial.println("[Net] Error: No Network!");
+                    MyUILogic.updateAssistantStatus("无网络连接");
                     MyUILogic.finishAIState();
                 }
             }
             
-            // 释放消息内存
             if (msg.data != NULL) { 
                 free(msg.data);
                 msg.data = NULL; 
             }
         }
 
-        // --- 2. 周期性网络维护 (每 5 秒) ---
+        // --- 2. 周期性网络维护 ---
         static uint32_t lastCheck = 0;
         if (millis() - lastCheck > 5000) {
             lastCheck = millis();
-            
-            // 即使在用 4G，后台也尝试重连 WiFi (为了省流量，WiFi 恢复后下次会自动切回)
             if (!MyWiFi.isConnected()) {
-                 // Serial.println("[Net] Background: Retrying WiFi...");
-                 MyWiFi.connect("HC-2G", "aa888888");
+                MyWiFi.connect("HC-2G", "aa888888");
             }
         }
     }

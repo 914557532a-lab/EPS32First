@@ -51,18 +51,14 @@
 
 
 /* =================================================================
- * 3. 4G 模块 (LTE Cat.1 - LE271-GL)
+ * 3. 4G 模块 (LTE Cat.1 - LE270-EU)
  * 通信: UART2
  * ================================================================= */
-#define PIN_4G_TX           12  // UART2_TX -> LE271_MAIN_TXD
-#define PIN_4G_RX           13  // UART2_RX -> LE271_MAIN_RXD
-#define PIN_4G_PWR_EN       45  // EN_LE271 -> LE271_PWER (模块总电源)
-#define PIN_4G_PWR_KEY      46  // EN_LE271KEY -> LE271_PWERKEY (开机键)
-#define PIN_4G_NETSTATE     14  // INT_LE271_NETSTATE (网络状态，复用为背光)
-
-// 注意：您的描述中提到 "RST_LE271 对应 EN_TFT_LED"，但也提到 GPIO14。
-// 列表中没有单独分配给 LE271 RESET 的 GPIO 编号，请检查硬件原理图确认 Reset 引脚。
-
+#define PIN_4G_PWR      45  // 主电源控制 (高电平开启)
+#define PIN_4G_PWRKEY   46  // 开机键 (硬件下拉，自动开机)
+#define PIN_4G_RX       12  // 连接模块的 TXD
+#define PIN_4G_TX       13  // 连接模块的 RXD
+#define PIN_4G_NET      14  // 网络状态灯 (复用屏幕背光)
 
 /* =================================================================
  * 4. 433MHz 射频模块 (CMT2300A)

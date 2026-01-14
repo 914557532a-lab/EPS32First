@@ -1,3 +1,6 @@
+/**
+ * @file App_4G.h
+ */
 #ifndef APP_4G_H
 #define APP_4G_H
 
@@ -22,8 +25,8 @@ public:
     // 4G 模块开机时序 (包含上电、拉PWRKEY、等待握手)，耗时操作
     void powerOn();
     
-    // 拨号连接移动网络 (设置 APN 并激活 PDP 上下文)
-    bool connect(); 
+    // [修改] 拨号连接移动网络，增加超时参数(默认15秒)
+    bool connect(unsigned long timeout_ms = 15000L); 
     
     // 检查网络是否连接 (GPRS/LTE 是否就绪)
     bool isConnected();
@@ -34,16 +37,17 @@ public:
     // 获取 Client 实例，用于传递给 App_Server 进行网络通信
     TinyGsmClient& getClient(); 
 
+    // [新增] 发送原始 AT 指令用于测试
+    void sendRawAT(String cmd);
+
 private:
     // 硬件串口指针 (指向 Serial2)
     HardwareSerial* _serial4G = &Serial2; 
     
-    // TinyGSM 核心对象指针 (建议动态分配，避免静态初始化顺序问题)
+    // TinyGSM 核心对象指针
     TinyGsm* _modem = nullptr;
     TinyGsmClient* _client = nullptr;
 
-    // 移动物联网卡 APN 配置
-    // 移动通常是 "cmnet" 或 "cmiot"，电信 "ctnet"，联通 "3gnet"
     String _apn = "cmnet"; 
     String _user = "";
     String _pass = "";
