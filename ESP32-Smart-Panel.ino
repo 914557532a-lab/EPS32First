@@ -108,7 +108,7 @@ void TaskAudio_Code(void *pvParameters) {
     }
 }
 
-// ================= [Core 0] TaskNet =================
+// ================= [Core 0] TaskNet (修复后) =================
 void TaskNet_Code(void *pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(1000));
     
@@ -127,25 +127,38 @@ void TaskNet_Code(void *pvParameters) {
     WiFiClient wifiClient; 
     NetMessage msg;
     
-    // [新增] 信号检查计时器
     static uint32_t lastSignalCheck = 0;
 
     for(;;) {
-        // --- 串口指令监听 (保持不变) ---
+        // --- [修复] 串口指令监听：增加模式切换逻辑 ---
         if (Serial.available()) {
             String input = Serial.readStringUntil('\n');
             input.trim();
-            if(input.length()>0) My4G.sendRawAT(input); // 简化处理
+            
+            if (input == "NET=4G") {
+                currentNetMode = NET_MODE_4G_ONLY;
+                Serial.println("\n>>> 切换模式: 强制 4G (WiFi 关闭)");
+                WiFi.disconnect(true);
+                WiFi.mode(WIFI_OFF);
+            } 
+            else if (input == "NET=AUTO") {
+                currentNetMode = NET_MODE_AUTO;
+                Serial.println("\n>>> 切换模式: 自动 (WiFi 优先)");
+                MyWiFi.connect("HC-2G", "aa888888");
+            }
+            else if (input.length() > 0) {
+                // 不是切换指令，才当作 AT 指令发送
+                My4G.sendRawAT(input); 
+            }
         }
 
         // --- 1. 处理消息队列 ---
         if (xQueueReceive(NetQueue_Handle, &msg, pdMS_TO_TICKS(20)) == pdTRUE) {
             if (msg.type == NET_EVENT_UPLOAD_AUDIO) {
-                // ... (保持原有的上传逻辑不变) ...
                 Serial.println("[Net] Upload Request Received.");
                 Client* activeClient = NULL;
                 
-                // 简单的网络选择逻辑
+                // 网络选择逻辑
                 if (currentNetMode != NET_MODE_4G_ONLY && MyWiFi.isConnected()) {
                     Serial.println("[Net] Using WiFi.");
                     activeClient = &wifiClient;
@@ -153,7 +166,7 @@ void TaskNet_Code(void *pvParameters) {
                     Serial.println("[Net] Using 4G...");
                     MyUILogic.updateAssistantStatus("正在使用4G...");
                     
-                    // 这里调用 connect，此时绝对没有其他人干扰 Serial2
+                    // 尝试连接
                     if (My4G.connect(15000L)) {
                          activeClient = &My4G.getClient();
                     } else {
@@ -171,18 +184,20 @@ void TaskNet_Code(void *pvParameters) {
             if (msg.data) { free(msg.data); msg.data = NULL; }
         }
 
-        // --- 2. [新增] 安全地查询信号强度 ---
-        // 只有当队列里没任务时，才会在空闲时查询
+        // --- 2. [修复] 信号查询逻辑 ---
+        // 只要 4G 模块初始化了，就应该允许查询信号，不一定要等到完全 Connected
         if (millis() - lastSignalCheck > 2000) {
             lastSignalCheck = millis();
-            // 只有在 4G 模式或 4G 已连接时才查
-            if (currentNetMode == NET_MODE_4G_ONLY || My4G.isConnected()) {
-                int csq = My4G.getSignalCSQ(); // 这里调用是安全的，因为都在 TaskNet 里
-                MyUILogic.setSignalCSQ(csq);   // 传给 UI 显示
-            }
+            
+            // 只要不是纯 WiFi 模式，或者是强制 4G 模式，就读信号
+            // 这里的逻辑：只要模块开着，就去读，防止 UI 没数据
+            int csq = My4G.getSignalCSQ();
+            // 过滤一下无效值 99，如果读到 99 就不更新 UI，或者显示 0
+            if (csq == 99) csq = 0; 
+            MyUILogic.setSignalCSQ(csq);
         }
         
-        // --- 3. WiFi 维护 (保持不变) ---
+        // --- 3. WiFi 维护 ---
         static uint32_t lastWiFiCheck = 0;
         if (millis() - lastWiFiCheck > 5000) {
             lastWiFiCheck = millis();

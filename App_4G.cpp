@@ -2,6 +2,11 @@
 
 App4G My4G;
 
+// 定义缓冲区
+uint8_t _internalBuffer[2048]; 
+int _internalBufferHead = 0;
+int _internalBufferTail = 0;
+
 void App4G::init() {
     pinMode(PIN_4G_PWR, OUTPUT);
     digitalWrite(PIN_4G_PWR, LOW); 
@@ -14,161 +19,212 @@ void App4G::init() {
 void App4G::powerOn() {
     Serial.println("[4G] Starting Power Sequence...");
     digitalWrite(PIN_4G_PWR, HIGH);
-    
-    Serial.println("[4G] Waiting for boot (10s)...");
-    for(int i=0; i<10; i++) {
-        Serial.printf(" %d", i+1);
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-    Serial.println();
+    delay(500);
+    Serial.println("[4G] Waiting for boot...");
+    delay(5000);
 
-    if (_modem == nullptr) {
-        _modem = new TinyGsm(*_serial4G);
-    }
-    if (_client == nullptr && _modem != nullptr) {
-        _client = new TinyGsmClient(*_modem);
-    }
+    if (_modem == nullptr) _modem = new TinyGsm(*_serial4G);
+    if (_client == nullptr) _client = new TinyGsmClient(*_modem);
 
-    Serial.println("[4G] Sending AT...");
     bool alive = false;
-    for(int i=0; i<20; i++) {
-        if (_modem->testAT(500)) { 
+    for(int i=0; i<10; i++) {
+        _serial4G->println("AT");
+        if (waitResponse("OK", 500)) { 
             alive = true;
             Serial.println("\n[4G] Module Alive!");
             break;
         }
-        Serial.print(".");
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        delay(500);
     }
 
     if (!alive) {
-        Serial.println("\n[4G] No Response. Trying pulse...");
+        Serial.println("\n[4G] No Response. Pulse PowerKey...");
         pinMode(PIN_4G_PWRKEY, OUTPUT);
         digitalWrite(PIN_4G_PWRKEY, HIGH); delay(100);
         digitalWrite(PIN_4G_PWRKEY, LOW);  delay(2500);
         digitalWrite(PIN_4G_PWRKEY, HIGH); 
         pinMode(PIN_4G_PWRKEY, INPUT);   
+        delay(5000);
     }
+    
+    // 开机强制开启射频
+    Serial.println("[4G] Set Full Functionality...");
+    _serial4G->println("AT+CFUN=1");
+    waitResponse("OK", 2000);
 }
 
 void App4G::sendRawAT(String cmd) {
     if (!_serial4G) return;
     while(_serial4G->available()) _serial4G->read(); 
+    Serial.print("[CMD] "); Serial.println(cmd);
     _serial4G->println(cmd);
-    delay(200); 
-    while (_serial4G->available()) Serial.write(_serial4G->read());
-    Serial.println();
+    waitResponse("OK", 1000);
 }
 
-bool App4G::checkIP_manual() {
-    if (!_serial4G) return false;
-    while(_serial4G->available()) _serial4G->read();
-    
-    _serial4G->println("AT+CGDCONT?");
-    String response = "";
+bool App4G::waitResponse(String expected, int timeout) {
+    String resp = "";
     unsigned long start = millis();
-    while (millis() - start < 1000) { // 缩短等待时间，避免日志刷屏太慢
-        while (_serial4G->available()) response += (char)_serial4G->read();
-        delay(10);
-    }
-    
-    if (response.indexOf("\"0.0.0.0\"") == -1 && 
-        (response.indexOf("\"10.") != -1 || response.indexOf("\"172.") != -1 || 
-         response.indexOf("\"100.") != -1 || response.indexOf("\"192.") != -1)) {
-        // Serial.println("[4G] IP Found."); // 减少刷屏，注释掉
-        return true;
+    while (millis() - start < timeout) {
+        vTaskDelay(pdMS_TO_TICKS(5)); 
+        while (_serial4G->available()) {
+            char c = _serial4G->read();
+            Serial.print(c); 
+            resp += c;
+            if (resp.indexOf(expected) != -1) return true;
+        }
     }
     return false;
 }
 
-bool App4G::ensureNetOpen() {
-    Serial.println("[4G] Checking NETOPEN status...");
-    
-    // 1. 先查询
-    _serial4G->println("AT+NETOPEN?");
-    String resp = "";
-    unsigned long start = millis();
-    while (millis() - start < 1000) {
-        while (_serial4G->available()) resp += (char)_serial4G->read();
-        delay(10);
-    }
-
-    if (resp.indexOf(": 1") != -1 || resp.indexOf("opened") != -1) {
-        Serial.println("[4G] Network Service is OPEN.");
-        return true;
-    }
-
-    // 2. 尝试打开
-    Serial.println("[4G] Trying to OPEN Network Service...");
-    sendRawAT("AT+NETOPEN"); 
-    
-    // 3. 再次查询 (如果打开失败，可能是已经开了但没查到，或者真挂了)
-    delay(1000);
-    _serial4G->println("AT+NETOPEN?");
-    resp = "";
-    start = millis();
-    while (millis() - start < 1000) {
-        while (_serial4G->available()) resp += (char)_serial4G->read();
-        delay(10);
-    }
-    
-    if (resp.indexOf(": 1") != -1) {
-        Serial.println("[4G] Network Service OPEN SUCCESS!");
-        return true;
-    }
-    
-    // [宽容处理] 如果前面查到了 IP，就算 NETOPEN 报错，我们也返回 true 试试
-    // 因为有些固件版本 NETOPEN 行为不一致
-    Serial.println("[4G] Warning: NETOPEN check failed, but proceeding anyway.");
-    return true; 
-}
-
-void App4G::checkDNS() {
-    Serial.println("[4G] Testing DNS (www.baidu.com)...");
-    sendRawAT("AT+CDNSGIP=\"www.baidu.com\"");
-}
-
+// 包含强制唤醒和注册等待的连接逻辑
 bool App4G::connect(unsigned long timeout_ms) {
     if (!_modem) return false;
+
+    int csq = getSignalCSQ();
+    Serial.printf("[4G] CSQ: %d\n", csq);
+    if (csq == 99 || csq == 0) return false;
+
+    // 强制唤醒射频 & 自动搜网
+    Serial.println("[4G] Forcing Network Search...");
+    _serial4G->println("AT+CFUN=1"); 
+    waitResponse("OK", 1000);
+    _serial4G->println("AT+COPS=0"); 
+    waitResponse("OK", 3000);        
+
+    // 等待注册
+    Serial.println("[4G] Waiting for Network Reg...");
+    bool isRegistered = false;
+    unsigned long regStart = millis();
     
-    // 1. 检查 IP (这是最关键的)
-    if (checkIP_manual()) {
-        Serial.println("[4G] IP detected. Verifying Services...");
-        
-        // 2. 确保 NETOPEN (Socket服务)
-        ensureNetOpen(); // 不管返回啥，都继续
-        
-        // 3. 检查 DNS (仅做调试，不再因为失败而返回 false)
-        checkDNS();
-        
-        _is_verified = true; 
-        Serial.println("[4G] >>> READY FOR TCP <<<");
+    while (millis() - regStart < 15000) {
+        _serial4G->println("AT+CEREG?"); 
+        if (waitResponse(",1", 500) || waitResponse(",5", 500)) {
+            isRegistered = true;
+            Serial.println("[4G] 4G/LTE Registered!");
+            break;
+        }
+        delay(500);
+        _serial4G->println("AT+CGREG?");
+        if (waitResponse(",1", 500) || waitResponse(",5", 500)) {
+             isRegistered = true;
+             Serial.println("[4G] 2G/3G Registered!");
+             break;
+        }
+        Serial.print(".");
+        delay(1000);
+    }
+    
+    // 检查是否已有 IP
+    _serial4G->println("AT+MIPCALL?");
+    if (waitResponse("10.", 1000) || waitResponse("100.", 1000) || waitResponse("172.", 1000)) {
+         Serial.println("[4G] Already connected.");
+         _is_verified = true;
+         return true;
+    }
+
+    // 复位并拨号
+    Serial.println("[4G] Resetting MIPCALL...");
+    _serial4G->println("AT+MIPCALL=0");
+    waitResponse("OK", 2000); 
+
+    Serial.println("[4G] Fibocom Init...");
+    _serial4G->println("AT+MIPCALL=1,\"" + _apn + "\"");
+    
+    if (waitResponse(".", 15000)) {
+        _is_verified = true;
+        Serial.println("[4G] >>> CONNECT SUCCESS (Fibocom) <<<");
         return true;
     }
 
-    // ... 下面的常规拨号逻辑保持不变 ...
-    if (timeout_ms < 30000) timeout_ms = 30000;
-    if (!_modem->waitForNetwork(timeout_ms)) return false;
-    sendRawAT("AT+CGDCONT=1,\"IP\",\"" + _apn + "\""); 
-    if (!_modem->gprsConnect(_apn.c_str(), _user.c_str(), _pass.c_str())) {
-        if (checkIP_manual()) {
-             ensureNetOpen();
-             _is_verified = true;
-             return true;
-        }
-        return false;
+    Serial.println("[4G] Connect Failed.");
+    return false;
+}
+
+bool App4G::connectTCP(const char* host, uint16_t port) {
+    Serial.println("[4G] Cleaning up Socket 1...");
+    _serial4G->println("AT+MIPCLOSE=1");
+    waitResponse("ERROR", 1000); 
+    waitResponse("OK", 1000);    
+
+    while(_serial4G->available()) _serial4G->read();
+    delay(100); 
+
+    // 使用正确的指令格式: AT+MIPOPEN=1,0,"host",port,0
+    String cmd = "AT+MIPOPEN=1,0,\"" + String(host) + "\"," + String(port) + ",0";
+    Serial.println(">> " + cmd);
+    _serial4G->println(cmd);
+    
+    // 等待连接成功 (+MIPOPEN: 1,1)
+    if (waitResponse("+MIPOPEN: 1,1", 20000) || waitResponse("CONNECT", 20000) || waitResponse("OK", 20000)) {
+        Serial.println("[4G] TCP Open OK");
+        return true;
     }
-    ensureNetOpen();
-    _is_verified = true;
-    return true;
+    
+    Serial.println("[4G] TCP Open Failed");
+    return false;
 }
 
-// [修改] 只有当 IP 存在 且 经过了 connect() 验证后，才返回 true
-bool App4G::isConnected() {
-    if (!_modem) return false;
-    return checkIP_manual() && _is_verified;
+bool App4G::sendData(const uint8_t* data, size_t len) {
+    _serial4G->printf("AT+MIPSEND=1,%d\r\n", len);
+    if (!waitResponse(">", 3000)) return false; 
+    _serial4G->write(data, len);
+    return waitResponse("OK", 8000) || waitResponse("SEND OK", 8000);
 }
 
+uint8_t hexCharToVal(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return 0;
+}
+
+// 读取数据：解析 +MIPRTCP 推送
+int App4G::readData(uint8_t* buf, size_t wantLen, uint32_t timeout_ms) {
+    unsigned long start = millis();
+    size_t totalReceived = 0;
+    bool catchingHex = false; 
+    char highNibble = 0;      
+    bool hasHighNibble = false; 
+
+    while (totalReceived < wantLen && (millis() - start < timeout_ms)) {
+        if (_serial4G->available()) {
+            char c = _serial4G->read();
+            static String lineBuffer = "";
+            if (!catchingHex) {
+                lineBuffer += c;
+                if (lineBuffer.length() > 20) lineBuffer = lineBuffer.substring(1);
+                // 只要看到 ,0, 就认为数据开始了 (适配 +MIPRTCP: 1,0,...)
+                if (lineBuffer.endsWith(",0,")) catchingHex = true;
+            } else {
+                if (isHexadecimalDigit(c)) {
+                    if (!hasHighNibble) {
+                        highNibble = hexCharToVal(c);
+                        hasHighNibble = true;
+                    } else {
+                        buf[totalReceived++] = (highNibble << 4) | hexCharToVal(c);
+                        hasHighNibble = false;
+                        if (totalReceived >= wantLen) return totalReceived;
+                    }
+                } else {
+                    if (c == '\r' || c == '\n') {
+                         catchingHex = false;
+                         lineBuffer = "";
+                    }
+                }
+            }
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+    }
+    return totalReceived;
+}
+
+void App4G::closeTCP() {
+    _serial4G->println("AT+MIPCLOSE=1");
+    waitResponse("OK", 1000);
+}
+bool App4G::isConnected() { return _is_verified; }
 String App4G::getIMEI() { return _modem ? _modem->getIMEI() : ""; }
-TinyGsmClient& App4G::getClient() { return *_client; }
+TinyGsmClient& App4G::getClient() { return *_client; } 
 int App4G::getSignalCSQ() { return _modem ? _modem->getSignalQuality() : 0; }
+bool App4G::checkIP_manual() { return true; }
