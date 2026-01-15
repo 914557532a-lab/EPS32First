@@ -14,6 +14,25 @@ void App4G::init() {
     digitalWrite(PIN_4G_PWR, LOW); 
 }
 
+// [修改] 增加调试回显
+bool App4G::waitResponse(const char* expected, uint32_t timeout) {
+    unsigned long start = millis();
+    String recv = "";
+    while (millis() - start < timeout) {
+        if (_serial4G->available()) {
+            char c = _serial4G->read();
+            
+            // 【关键】打印 4G 模块的回复，方便你看到报错
+            Serial.write(c); 
+            
+            recv += c;
+            if (recv.indexOf(expected) != -1) return true;
+        }
+        vTaskDelay(1);
+    }
+    return false;
+}
+
 bool App4G::checkBaudrate(uint32_t baud) {
     _serial4G->updateBaudRate(baud);
     delay(50);
@@ -32,6 +51,7 @@ void App4G::powerOn() {
     _serial4G->begin(targetBaud, SERIAL_8N1, PIN_4G_RX, PIN_4G_TX);
     delay(100);
 
+    Serial.println("[4G] Trying to sync baudrate...");
     if (!checkBaudrate(targetBaud)) {
         if (checkBaudrate(460800)) {
             _serial4G->printf("AT+IPR=%d\r\n", targetBaud); delay(200);
@@ -39,6 +59,7 @@ void App4G::powerOn() {
             _serial4G->printf("AT+IPR=%d\r\n", targetBaud); delay(200);
         } else {
             // 硬件复位
+            Serial.println("[4G] Hard Resetting...");
             pinMode(PIN_4G_PWRKEY, OUTPUT);
             digitalWrite(PIN_4G_PWRKEY, HIGH); delay(100);
             digitalWrite(PIN_4G_PWRKEY, LOW);  delay(2500);
@@ -55,18 +76,79 @@ void App4G::powerOn() {
     if (_client == nullptr) _client = new TinyGsmClient(*_modem);
 }
 
+// [修复] 真正的连接检查逻辑
+bool App4G::connect(unsigned long timeout_ms) {
+    unsigned long start = millis();
+    Serial.print("[4G] Checking Network... ");
+    
+    while (millis() - start < timeout_ms) {
+        // 使用 TinyGsm 检查网络注册状态
+        if (_modem && _modem->isNetworkConnected()) {
+            Serial.println("OK! (Connected)");
+            return true;
+        }
+        
+        Serial.print(".");
+        vTaskDelay(1000); 
+    }
+    
+    Serial.println(" Timeout!");
+    return false;
+}
+
 bool App4G::connectTCP(const char* host, uint16_t port) {
     rxHead = rxTail = 0; 
     g_st = ST_SEARCH;    
     
-    _serial4G->println("AT+MIPCLOSE=1"); waitResponse("OK", 500);    
+    // 1. 关闭可能存在的旧连接
+    _serial4G->println("AT+MIPCLOSE=1"); 
+    waitResponse("OK", 500);    
 
-    // 关键指令：开启 Hex 转码模式 (参数 2)
-    _serial4G->println("AT+GTSET=\"IPRFMT\",2"); 
-    waitResponse("OK", 1000);
+    // [删除] 既然之前报错 ERROR，说明模块不支持或不需要这个设置
+    // 而且我们需要发送原始二进制，不设置反而更好！
+    // _serial4G->println("AT+GTSET=\"IPRFMT\",2"); 
+    // waitResponse("OK", 1000);
 
+    // 2. 双重保险：检查是否有 IP，没有则激活
+    // (防止 AT+MIPCALL=1 之后过一会掉线)
+    _serial4G->println("AT+MIPCALL?");
+    // 如果回复 +MIPCALL: 0 说明没 IP
+    if (waitResponse("+MIPCALL: 0", 500)) {
+         Serial.println("[4G] Reactivating IP...");
+         _serial4G->println("AT+CGDCONT=1,\"IP\",\"cmnet\""); waitResponse("OK", 500);
+         _serial4G->println("AT+MIPCALL=1"); 
+         waitResponse("OK", 3000);
+    }
+
+    // 3. 发起连接
     _serial4G->printf("AT+MIPOPEN=1,0,\"%s\",%d,0\r\n", host, port);
-    return waitResponse("CONNECT", 20000) || waitResponse("OK", 20000);
+    
+    // 4. [核心修复] 智能等待连接结果
+    // 只要收到 "+MIPOPEN: 1,1" 或者 "CONNECT" 都算成功
+    unsigned long start = millis();
+    while (millis() - start < 20000) {
+        if (_serial4G->available()) {
+            String line = _serial4G->readStringUntil('\n');
+            line.trim();
+            
+            // 打印调试信息，让你看到发生了什么
+            if (line.length() > 0) Serial.println("[4G RAW] " + line);
+            
+            // 判定成功条件：
+            // 条件A: 出现 CONNECT (某些固件)
+            // 条件B: 出现 +MIPOPEN: 1,1 (你的固件)
+            if (line.indexOf("CONNECT") != -1) return true;
+            if (line.indexOf("+MIPOPEN:") != -1 && line.indexOf(",1") != -1) return true;
+            
+            // 判定失败条件
+            if (line.indexOf("ERROR") != -1) return false;
+            if (line.indexOf("+MIPOPEN:") != -1 && line.indexOf(",0") != -1) return false;
+        }
+        vTaskDelay(10);
+    }
+    
+    Serial.println("[4G] TCP Connect Timeout");
+    return false;
 }
 
 void App4G::closeTCP() {
@@ -111,7 +193,6 @@ void App4G::process4GStream() {
                     }
                 } else {
                     // 匹配失败，回退
-                    // 简单优化：如果当前字符是 '+'，则视为新匹配的开始
                     if (c == HEADER_MATCH[0]) matchIdx = 1;
                     else matchIdx = 0;
                 }
@@ -181,8 +262,7 @@ int App4G::readData(uint8_t* buf, size_t wantLen, uint32_t timeout_ms) {
             buf[received++] = (uint8_t)b;
             start = millis(); // 收到数据刷新超时
             
-            // 极速模式下，减少 vTaskDelay 频率，每接收 256 字节才让出一次
-            // 既防止看门狗复位，又不拖慢速度
+            // 极速模式下，减少 vTaskDelay 频率
             if (received % 256 == 0) vTaskDelay(1); 
         } else {
             vTaskDelay(1); // 没数据时休息一下
@@ -191,24 +271,9 @@ int App4G::readData(uint8_t* buf, size_t wantLen, uint32_t timeout_ms) {
     return received;
 }
 
-bool App4G::waitResponse(const char* expected, uint32_t timeout) {
-    unsigned long start = millis();
-    String recv = "";
-    while (millis() - start < timeout) {
-        if (_serial4G->available()) {
-            char c = _serial4G->read();
-            recv += c;
-            if (recv.indexOf(expected) != -1) return true;
-        }
-        vTaskDelay(1);
-    }
-    return false;
-}
-
-// 兼容性空函数
-bool App4G::connect(unsigned long timeout_ms) { return false; }
-bool App4G::isConnected() { return false; }
-String App4G::getIMEI() { return ""; }
+// 简单的 Getter 包装
+bool App4G::isConnected() { return _modem && _modem->isNetworkConnected(); }
+String App4G::getIMEI() { return _modem ? _modem->getIMEI() : ""; }
 TinyGsmClient& App4G::getClient() { return *_client; }
 void App4G::sendRawAT(String cmd) { _serial4G->println(cmd); }
-int App4G::getSignalCSQ() { return 0; }
+int App4G::getSignalCSQ() { return _modem ? _modem->getSignalQuality() : 0; }

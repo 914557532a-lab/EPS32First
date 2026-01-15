@@ -201,46 +201,36 @@ void AppAudio::playStream(Client* client, int length) {
 void AppAudio::playChunk(uint8_t* data, size_t len) {
     if (data == NULL || len == 0) return;
 
-    Serial.printf("[Audio] PlayChunk: %d bytes\n", len);
+    // Serial.printf("[Audio] PlayChunk: %d bytes\n", len); // 嫌刷屏太快可以注释掉
 
-    // 1. 【重要】手动开启功放（原代码漏了这句）
-    digitalWrite(PIN_PA_EN, HIGH);
-    delay(20); // 防爆破音
+    // ================================================================
+    // [重要修改] 删除了这里的 功放开启 和 delay
+    // 流式播放时，不能每播放一小段就开关一次功放，否则声音全是断的
+    // ================================================================
 
-    // 2. 单声道转立体声处理
-    // 原理：I2S 配置为立体声(2ch)，但数据是单声道(1ch)。
-    // 我们需要把每个采样点复制一份： L -> L+R
-    
-    // len 是字节数。16bit = 2字节。
-    // 样本数 = len / 2
+    // 2. 单声道转立体声处理 (保持不变)
     size_t sample_count = len / 2; 
-    
-    // 为了节省内存，我们分批处理，不要一次性申请大内存
     const int BATCH_SAMPLES = 256; 
-    int16_t stereo_batch[BATCH_SAMPLES * 2]; // 临时缓存：256个样本 * 2声道
+    int16_t stereo_batch[BATCH_SAMPLES * 2]; 
 
-    int16_t *pcm_in = (int16_t*)data; // 将输入数据视为 16bit 数组
+    int16_t *pcm_in = (int16_t*)data; 
 
     for (size_t i = 0; i < sample_count; i += BATCH_SAMPLES) {
-        // 计算当前批次处理多少个样本
         size_t remain = sample_count - i;
         size_t current_batch_size = (remain > BATCH_SAMPLES) ? BATCH_SAMPLES : remain;
 
-        // 【核心转换循环】
         for (size_t j = 0; j < current_batch_size; j++) {
-            int16_t val = pcm_in[i + j]; // 读取 1 个单声道样本
-            stereo_batch[j * 2]     = val; // 左声道
-            stereo_batch[j * 2 + 1] = val; // 右声道 (复制)
+            int16_t val = pcm_in[i + j]; 
+            stereo_batch[j * 2]     = val; 
+            stereo_batch[j * 2 + 1] = val; 
         }
 
-        // 写入 I2S，注意字节数是样本数 * 4 (2声道 * 2字节)
         i2s.write((uint8_t*)stereo_batch, current_batch_size * 4);
     }
 
-    // 3. 播放结束处理
-    writeSilence(50); // 冲刷缓冲区
-    digitalWrite(PIN_PA_EN, LOW); // 关闭功放省电
-    Serial.println("[Audio] Play Done");
+    // ================================================================
+    // [重要修改] 删除了这里的 功放关闭
+    // ================================================================
 }
 
 void AppAudio::createWavHeader(uint8_t *header, uint32_t totalDataLen, uint32_t sampleRate, uint8_t sampleBits, uint8_t numChannels) {

@@ -109,7 +109,10 @@ void TaskAudio_Code(void *pvParameters) {
     }
 }
 
-// ================= [Core 0] TaskNet (修复版) =================
+// [文件] ESP32-Smart-Panel.ino
+// 请完整替换原有的 TaskNet_Code 函数
+
+// ================= [Core 0] TaskNet (完整修复版) =================
 void TaskNet_Code(void *pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(1000));
     
@@ -125,12 +128,20 @@ void TaskNet_Code(void *pvParameters) {
     My4G.powerOn();
     MyServer.init(SERVER_HOST, SERVER_PORT);
     
-    WiFiClient wifiClient; // <--- 这个对象很重要
+    WiFiClient wifiClient; 
     NetMessage msg;
     
     static uint32_t lastSignalCheck = 0;
+    static uint32_t lastWiFiCheck = 0;
 
     for(;;) {
+        // ============================================================
+        // [新增] 监听 4G 模块回复 (必须加这句，否则你看不到 AT 结果)
+        // ============================================================
+        while (My4G.getClientSerial()->available()) {
+            Serial.write(My4G.getClientSerial()->read());
+        }
+
         // --- 串口指令监听 ---
         if (Serial.available()) {
             String input = Serial.readStringUntil('\n');
@@ -148,12 +159,14 @@ void TaskNet_Code(void *pvParameters) {
                 MyWiFi.connect("HC-2G", "aa888888");
             }
             else if (input.length() > 0) {
-                My4G.sendRawAT(input); 
+                // 发送指令给 4G 模块
+                My4G.sendRawAT(input);
             }
         }
 
         // --- 1. 处理消息队列 ---
-        if (xQueueReceive(NetQueue_Handle, &msg, pdMS_TO_TICKS(20)) == pdTRUE) {
+        // 将等待时间改为 5ms，避免阻塞太久导致串口数据丢失
+        if (xQueueReceive(NetQueue_Handle, &msg, pdMS_TO_TICKS(5)) == pdTRUE) {
             if (msg.type == NET_EVENT_UPLOAD_AUDIO) {
                 Serial.println("[Net] Upload Request Received.");
                 
@@ -162,21 +175,17 @@ void TaskNet_Code(void *pvParameters) {
                 
                 if (isWiFiReady) {
                     Serial.println("[Net] Using WiFi.");
-                    // WiFi 模式：直接把 client 传进去
                     MyServer.chatWithServer(&wifiClient);
                 } else {
                     Serial.println("[Net] Using 4G...");
                     MyUILogic.updateAssistantStatus("正在使用4G...");
                     
-                    // 4G 模式：先确保基站连接和 PDP 激活
+                    // 4G 模式：连接检查 (现在这里会调用修复后的 connect)
                     if (My4G.connect(15000L)) {
-                         // 网络通了，交给 Server 处理 TCP
-                         // 这里的 &wifiClient 只是为了满足函数参数要求，
-                         // 在 4G 模式下，App_Server 内部会自动切换到手动驱动，忽略这个参数
                          MyServer.chatWithServer(&wifiClient);
                     } else {
                          MyUILogic.updateAssistantStatus("4G连接失败");
-                         MyUILogic.finishAIState(); // 别忘了恢复 UI 状态
+                         MyUILogic.finishAIState(); 
                     }
                 }
             }
@@ -186,7 +195,6 @@ void TaskNet_Code(void *pvParameters) {
         // --- 2. 信号查询 ---
         if (millis() - lastSignalCheck > 2000) {
             lastSignalCheck = millis();
-            // 只要在 4G 模式或者 4G 模块已开启，就刷新信号
             if (currentNetMode == NET_MODE_4G_ONLY || My4G.isConnected()) {
                 int csq = My4G.getSignalCSQ();
                 if (csq == 99) csq = 0;
@@ -195,7 +203,6 @@ void TaskNet_Code(void *pvParameters) {
         }
         
         // --- 3. WiFi 自动重连 ---
-        static uint32_t lastWiFiCheck = 0;
         if (millis() - lastWiFiCheck > 5000) {
             lastWiFiCheck = millis();
             if (currentNetMode != NET_MODE_4G_ONLY && !MyWiFi.isConnected()) {
@@ -204,7 +211,6 @@ void TaskNet_Code(void *pvParameters) {
         }
     }
 }
-
 // ================= [Core 0] TaskIR =================
 void TaskIR_Code(void *pvParameters) {
     MyIR.init();
