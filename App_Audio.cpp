@@ -197,6 +197,16 @@ void AppAudio::playStream(Client* client, int length) {
     Serial.println("[Audio] Stream End");
 }
 
+void AppAudio::playChunk(uint8_t* data, size_t len) {
+    if (data == NULL || len == 0) return;
+    
+    size_t bytes_written;
+    // 调用 ESP32 原生 I2S 接口发送数据
+    // 注意：确保你的 init 函数里 I2S_PORT 是配置好的 (通常是 I2S_NUM_0)
+    i2s_write(I2S_NUM_0, data, len, &bytes_written, portMAX_DELAY);
+}
+
+
 void AppAudio::createWavHeader(uint8_t *header, uint32_t totalDataLen, uint32_t sampleRate, uint8_t sampleBits, uint8_t numChannels) {
     uint32_t byteRate = sampleRate * numChannels * (sampleBits / 8);
     uint32_t totalFileSize = totalDataLen + 44 - 8;

@@ -9,7 +9,7 @@
 #include <WiFi.h> // 需要引用以支持 Client (或者 <Client.h>)
 
 #define AUDIO_SAMPLE_RATE  24000 
-
+#define AUDIO_BUFFER_SIZE 512000
 class AppAudio {
 public:
     void init();
@@ -32,6 +32,7 @@ public:
     uint8_t *record_buffer = NULL;       
     uint32_t record_data_len = 0;        
     const uint32_t MAX_RECORD_SIZE = 1024 * 512; 
+    void playChunk(uint8_t* data, size_t len);
 
 private:
     void createWavHeader(uint8_t *header, uint32_t totalDataLen, uint32_t sampleRate, uint8_t sampleBits, uint8_t numChannels);

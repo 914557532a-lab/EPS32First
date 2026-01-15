@@ -2,18 +2,27 @@
 
 App4G My4G;
 
-// 定义缓冲区
-uint8_t _internalBuffer[2048]; 
-int _internalBufferHead = 0;
-int _internalBufferTail = 0;
+// 【关键修复】将解析状态移到函数外面，作为全局静态变量
+// 这样即使 readData 分多次调用，也能接上由于断点
+static bool g_catchingHex = false;
+static char g_highNibble = 0;
+static bool g_hasHighNibble = false;
 
 void App4G::init() {
     pinMode(PIN_4G_PWR, OUTPUT);
     digitalWrite(PIN_4G_PWR, LOW); 
     pinMode(PIN_4G_PWRKEY, INPUT); 
 
+    // 1. 开启 R8 核动力 (256KB 接收缓存)
+    // 只要 Arduino 选了 OPI PSRAM，这里绝对稳
+    _serial4G->setRxBufferSize(262144); 
+    
+    // 2. 启动串口
     _serial4G->begin(115200, SERIAL_8N1, PIN_4G_RX, PIN_4G_TX);
-    Serial.println("[4G] Init Done.");
+    
+    // 稍微延时让内存分配完成
+    delay(100);
+    Serial.println("[4G] Init Done (RxBuf=256KB, Baud=115200).");
 }
 
 void App4G::powerOn() {
@@ -47,7 +56,6 @@ void App4G::powerOn() {
         delay(5000);
     }
     
-    // 开机强制开启射频
     Serial.println("[4G] Set Full Functionality...");
     _serial4G->println("AT+CFUN=1");
     waitResponse("OK", 2000);
@@ -68,7 +76,7 @@ bool App4G::waitResponse(String expected, int timeout) {
         vTaskDelay(pdMS_TO_TICKS(5)); 
         while (_serial4G->available()) {
             char c = _serial4G->read();
-            Serial.print(c); 
+            // 这里不要打印，以免干扰 AT 指令判断
             resp += c;
             if (resp.indexOf(expected) != -1) return true;
         }
@@ -76,7 +84,6 @@ bool App4G::waitResponse(String expected, int timeout) {
     return false;
 }
 
-// 包含强制唤醒和注册等待的连接逻辑
 bool App4G::connect(unsigned long timeout_ms) {
     if (!_modem) return false;
 
@@ -84,37 +91,26 @@ bool App4G::connect(unsigned long timeout_ms) {
     Serial.printf("[4G] CSQ: %d\n", csq);
     if (csq == 99 || csq == 0) return false;
 
-    // 强制唤醒射频 & 自动搜网
     Serial.println("[4G] Forcing Network Search...");
-    _serial4G->println("AT+CFUN=1"); 
-    waitResponse("OK", 1000);
-    _serial4G->println("AT+COPS=0"); 
-    waitResponse("OK", 3000);        
+    _serial4G->println("AT+CFUN=1"); waitResponse("OK", 1000);
+    _serial4G->println("AT+COPS=0"); waitResponse("OK", 3000);        
 
-    // 等待注册
     Serial.println("[4G] Waiting for Network Reg...");
     bool isRegistered = false;
     unsigned long regStart = millis();
-    
     while (millis() - regStart < 15000) {
         _serial4G->println("AT+CEREG?"); 
         if (waitResponse(",1", 500) || waitResponse(",5", 500)) {
-            isRegistered = true;
-            Serial.println("[4G] 4G/LTE Registered!");
-            break;
+            isRegistered = true; Serial.println("[4G] LTE Reg!"); break;
         }
         delay(500);
         _serial4G->println("AT+CGREG?");
         if (waitResponse(",1", 500) || waitResponse(",5", 500)) {
-             isRegistered = true;
-             Serial.println("[4G] 2G/3G Registered!");
-             break;
+             isRegistered = true; Serial.println("[4G] 2G/3G Reg!"); break;
         }
-        Serial.print(".");
-        delay(1000);
+        Serial.print("."); delay(1000);
     }
     
-    // 检查是否已有 IP
     _serial4G->println("AT+MIPCALL?");
     if (waitResponse("10.", 1000) || waitResponse("100.", 1000) || waitResponse("172.", 1000)) {
          Serial.println("[4G] Already connected.");
@@ -122,46 +118,32 @@ bool App4G::connect(unsigned long timeout_ms) {
          return true;
     }
 
-    // 复位并拨号
     Serial.println("[4G] Resetting MIPCALL...");
-    _serial4G->println("AT+MIPCALL=0");
-    waitResponse("OK", 2000); 
+    _serial4G->println("AT+MIPCALL=0"); waitResponse("OK", 2000); 
 
     Serial.println("[4G] Fibocom Init...");
     _serial4G->println("AT+MIPCALL=1,\"" + _apn + "\"");
-    
     if (waitResponse(".", 15000)) {
-        _is_verified = true;
-        Serial.println("[4G] >>> CONNECT SUCCESS (Fibocom) <<<");
-        return true;
+        _is_verified = true; Serial.println("[4G] CONNECT SUCCESS"); return true;
     }
-
-    Serial.println("[4G] Connect Failed.");
     return false;
 }
 
 bool App4G::connectTCP(const char* host, uint16_t port) {
     Serial.println("[4G] Cleaning up Socket 1...");
-    _serial4G->println("AT+MIPCLOSE=1");
-    waitResponse("ERROR", 1000); 
-    waitResponse("OK", 1000);    
+    _serial4G->println("AT+MIPCLOSE=1"); waitResponse("OK", 1000);    
 
     while(_serial4G->available()) _serial4G->read();
     delay(100); 
 
-    // 使用正确的指令格式: AT+MIPOPEN=1,0,"host",port,0
     String cmd = "AT+MIPOPEN=1,0,\"" + String(host) + "\"," + String(port) + ",0";
     Serial.println(">> " + cmd);
     _serial4G->println(cmd);
     
-    // 等待连接成功 (+MIPOPEN: 1,1)
     if (waitResponse("+MIPOPEN: 1,1", 20000) || waitResponse("CONNECT", 20000) || waitResponse("OK", 20000)) {
-        Serial.println("[4G] TCP Open OK");
-        return true;
+        Serial.println("[4G] TCP Open OK"); return true;
     }
-    
-    Serial.println("[4G] TCP Open Failed");
-    return false;
+    Serial.println("[4G] TCP Open Failed"); return false;
 }
 
 bool App4G::sendData(const uint8_t* data, size_t len) {
@@ -178,37 +160,51 @@ uint8_t hexCharToVal(char c) {
     return 0;
 }
 
-// 读取数据：解析 +MIPRTCP 推送
+// 【关键修改】使用全局静态变量 g_catchingHex 的读取函数
 int App4G::readData(uint8_t* buf, size_t wantLen, uint32_t timeout_ms) {
     unsigned long start = millis();
     size_t totalReceived = 0;
-    bool catchingHex = false; 
-    char highNibble = 0;      
-    bool hasHighNibble = false; 
+    
+    // 如果一次性要读很多，稍微多给点时间
+    if (wantLen > 10000) timeout_ms += 20000;
 
     while (totalReceived < wantLen && (millis() - start < timeout_ms)) {
         if (_serial4G->available()) {
             char c = _serial4G->read();
-            static String lineBuffer = "";
-            if (!catchingHex) {
+            
+            // 【开启上帝视角】
+            // 因为我们有 256KB 大缓存，打印不会造成严重丢包
+            // 我们必须看看模组到底发了什么！
+            Serial.print(c); 
+
+            // 如果还没进入 Hex 数据段，就检测头
+            if (!g_catchingHex) {
+                static String lineBuffer = ""; // 这个保持 static 没问题，只在检测头时用
                 lineBuffer += c;
                 if (lineBuffer.length() > 20) lineBuffer = lineBuffer.substring(1);
-                // 只要看到 ,0, 就认为数据开始了 (适配 +MIPRTCP: 1,0,...)
-                if (lineBuffer.endsWith(",0,")) catchingHex = true;
-            } else {
+                
+                // 只要看到 ,0, 或者 1,0, 就认为数据开始了
+                if (lineBuffer.endsWith(",0,") || lineBuffer.endsWith("1,0,")) {
+                    g_catchingHex = true;
+                }
+            } 
+            // 如果已经在 Hex 数据段，直接解析
+            else {
                 if (isHexadecimalDigit(c)) {
-                    if (!hasHighNibble) {
-                        highNibble = hexCharToVal(c);
-                        hasHighNibble = true;
+                    if (!g_hasHighNibble) {
+                        g_highNibble = hexCharToVal(c);
+                        g_hasHighNibble = true;
                     } else {
-                        buf[totalReceived++] = (highNibble << 4) | hexCharToVal(c);
-                        hasHighNibble = false;
+                        buf[totalReceived++] = (g_highNibble << 4) | hexCharToVal(c);
+                        g_hasHighNibble = false;
                         if (totalReceived >= wantLen) return totalReceived;
                     }
                 } else {
+                    // 如果遇到换行符，说明这一包数据传完了
+                    // 重置状态，准备迎接下一个 +MIPRTCP 头
                     if (c == '\r' || c == '\n') {
-                         catchingHex = false;
-                         lineBuffer = "";
+                         g_catchingHex = false;
+                         // 注意：这里不能清空 lineBuffer，因为那是局部静态变量
                     }
                 }
             }

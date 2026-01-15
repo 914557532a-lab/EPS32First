@@ -57,6 +57,7 @@ struct AudioMsg {
     uint8_t type; 
     int param;
 };
+
 // ================= [Core 1] TaskUI =================
 void TaskUI_Code(void *pvParameters) {
     MyDisplay.init();
@@ -108,7 +109,7 @@ void TaskAudio_Code(void *pvParameters) {
     }
 }
 
-// ================= [Core 0] TaskNet (修复后) =================
+// ================= [Core 0] TaskNet (修复版) =================
 void TaskNet_Code(void *pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(1000));
     
@@ -124,13 +125,13 @@ void TaskNet_Code(void *pvParameters) {
     My4G.powerOn();
     MyServer.init(SERVER_HOST, SERVER_PORT);
     
-    WiFiClient wifiClient; 
+    WiFiClient wifiClient; // <--- 这个对象很重要
     NetMessage msg;
     
     static uint32_t lastSignalCheck = 0;
 
     for(;;) {
-        // --- [修复] 串口指令监听：增加模式切换逻辑 ---
+        // --- 串口指令监听 ---
         if (Serial.available()) {
             String input = Serial.readStringUntil('\n');
             input.trim();
@@ -147,7 +148,6 @@ void TaskNet_Code(void *pvParameters) {
                 MyWiFi.connect("HC-2G", "aa888888");
             }
             else if (input.length() > 0) {
-                // 不是切换指令，才当作 AT 指令发送
                 My4G.sendRawAT(input); 
             }
         }
@@ -156,48 +156,45 @@ void TaskNet_Code(void *pvParameters) {
         if (xQueueReceive(NetQueue_Handle, &msg, pdMS_TO_TICKS(20)) == pdTRUE) {
             if (msg.type == NET_EVENT_UPLOAD_AUDIO) {
                 Serial.println("[Net] Upload Request Received.");
-                Client* activeClient = NULL;
                 
-                // 网络选择逻辑
-                if (currentNetMode != NET_MODE_4G_ONLY && MyWiFi.isConnected()) {
+                // 判断当前是否可用 WiFi
+                bool isWiFiReady = (currentNetMode != NET_MODE_4G_ONLY && MyWiFi.isConnected());
+                
+                if (isWiFiReady) {
                     Serial.println("[Net] Using WiFi.");
-                    activeClient = &wifiClient;
+                    // WiFi 模式：直接把 client 传进去
+                    MyServer.chatWithServer(&wifiClient);
                 } else {
                     Serial.println("[Net] Using 4G...");
                     MyUILogic.updateAssistantStatus("正在使用4G...");
                     
-                    // 尝试连接
+                    // 4G 模式：先确保基站连接和 PDP 激活
                     if (My4G.connect(15000L)) {
-                         activeClient = &My4G.getClient();
+                         // 网络通了，交给 Server 处理 TCP
+                         // 这里的 &wifiClient 只是为了满足函数参数要求，
+                         // 在 4G 模式下，App_Server 内部会自动切换到手动驱动，忽略这个参数
+                         MyServer.chatWithServer(&wifiClient);
                     } else {
                          MyUILogic.updateAssistantStatus("4G连接失败");
+                         MyUILogic.finishAIState(); // 别忘了恢复 UI 状态
                     }
-                }
-
-                if (activeClient) {
-                    MyServer.chatWithServer(activeClient);
-                } else {
-                    MyUILogic.updateAssistantStatus("无网络");
-                    MyUILogic.finishAIState();
                 }
             }
             if (msg.data) { free(msg.data); msg.data = NULL; }
         }
 
-        // --- 2. [修复] 信号查询逻辑 ---
-        // 只要 4G 模块初始化了，就应该允许查询信号，不一定要等到完全 Connected
+        // --- 2. 信号查询 ---
         if (millis() - lastSignalCheck > 2000) {
             lastSignalCheck = millis();
-            
-            // 只要不是纯 WiFi 模式，或者是强制 4G 模式，就读信号
-            // 这里的逻辑：只要模块开着，就去读，防止 UI 没数据
-            int csq = My4G.getSignalCSQ();
-            // 过滤一下无效值 99，如果读到 99 就不更新 UI，或者显示 0
-            if (csq == 99) csq = 0; 
-            MyUILogic.setSignalCSQ(csq);
+            // 只要在 4G 模式或者 4G 模块已开启，就刷新信号
+            if (currentNetMode == NET_MODE_4G_ONLY || My4G.isConnected()) {
+                int csq = My4G.getSignalCSQ();
+                if (csq == 99) csq = 0;
+                MyUILogic.setSignalCSQ(csq);
+            }
         }
         
-        // --- 3. WiFi 维护 ---
+        // --- 3. WiFi 自动重连 ---
         static uint32_t lastWiFiCheck = 0;
         if (millis() - lastWiFiCheck > 5000) {
             lastWiFiCheck = millis();
@@ -238,6 +235,7 @@ void setup() {
     KeyQueue_Handle   = xQueueCreate(10, sizeof(KeyAction));
     IRQueue_Handle    = xQueueCreate(5,  sizeof(IREvent));
     NetQueue_Handle   = xQueueCreate(3, sizeof(NetMessage));
+
     // 创建任务
     xTaskCreatePinnedToCore(TaskAudio_Code, "Audio",   4096, NULL, 4, &TaskAudio_Handle, 0);
     xTaskCreatePinnedToCore(TaskNet_Code,   "Net",     8192, NULL, 1, &TaskNet_Handle,   0);
