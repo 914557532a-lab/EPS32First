@@ -74,7 +74,7 @@ void AppAudio::init() {
     cfg.input_device = ADC_INPUT_ALL; 
     cfg.output_device = DAC_OUTPUT_ALL;
     cfg.i2s.bits = BIT_LENGTH_16BITS;
-    cfg.i2s.rate = RATE_48K; 
+    cfg.i2s.rate = RATE_16K; 
     cfg.i2s.fmt = I2S_NORMAL; 
 
     if (board.begin(cfg)) Serial.println("[Audio] Codec OK");

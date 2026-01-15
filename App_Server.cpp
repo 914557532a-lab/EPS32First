@@ -33,6 +33,8 @@ bool sendIntManual(uint32_t val) {
 
 // [文件] App_Server.cpp
 
+// [文件] App_Server.cpp
+
 void AppServer::chatWithServer(Client* networkClient) {
     bool isWiFi = MyWiFi.isConnected(); 
     Serial.printf("[Server] Connect %s:%d (%s)...\n", _server_ip, _server_port, isWiFi?"WiFi":"4G");
@@ -51,7 +53,7 @@ void AppServer::chatWithServer(Client* networkClient) {
         return;
     }
 
-    // --- 发送音频 ---
+    // --- 1. 发送音频 ---
     uint32_t audioSize = MyAudio.record_data_len;
     MyUILogic.updateAssistantStatus("发送指令...");
     
@@ -75,18 +77,19 @@ void AppServer::chatWithServer(Client* networkClient) {
     
     MyUILogic.updateAssistantStatus("思考中...");
 
-    // --- 接收响应 ---
+    // --- 2. 接收响应 ---
     if (!isWiFi) {
-        // 1. 接收 JSON
+        // (A) 接收 JSON
         Serial.println("[4G] Reading JSON...");
         String jsonHex = "";
         uint32_t startTime = millis();
+        // 增加 JSON 接收超时时间，防止网络波动
         while (millis() - startTime < 15000) { 
             uint8_t c;
             if (My4G.readData(&c, 1, 50) == 1) { 
-                if (c == '*') break; 
+                if (c == '*') break; // 遇到星号结束 JSON 部分
                 if (c != '\n' && c != '\r') jsonHex += (char)c; 
-                startTime = millis(); 
+                startTime = millis(); // 收到数据刷新超时
             } else vTaskDelay(1);
         }
 
@@ -102,38 +105,41 @@ void AppServer::chatWithServer(Client* networkClient) {
             }
         }
 
-        // 2. 接收音频 (关键修复：使用 malloc)
+        // (B) 接收音频
         Serial.println("[4G] Reading Audio...");
         MyUILogic.updateAssistantStatus("正在回复");
         
-        digitalWrite(PIN_PA_EN, HIGH);
+        digitalWrite(PIN_PA_EN, HIGH); // 开启功放
         delay(50); 
 
+        // 建议减小缓冲区以防内存不足，这里用 4096 也行，如果报错 Alloc Failed 就改小
         const int BUF_SIZE = 4096; 
-        // [核心修复] 改为动态分配，防止栈溢出
         uint8_t* pcmBuf = (uint8_t*)malloc(BUF_SIZE);
         
-        if (pcmBuf) { // 只有分配成功才执行
+        if (pcmBuf) { 
             int pcmIdx = 0;
             uint8_t hexPair[2]; 
             int pairIdx = 0;
             int idleCount = 0;
 
             startTime = millis();
+            // 音频接收循环
             while (millis() - startTime < 30000) { 
                 uint8_t c;
-                // [优化] 增加超时检测稳定性
                 if (My4G.readData(&c, 1, 20) == 1) {
                     startTime = millis(); 
                     idleCount = 0;
                     
-                    if (c == '*') { Serial.println("[4G] Audio End (*)."); break; }
+                    if (c == '*') { Serial.println("[4G] Audio End (*)."); break; } // 遇到星号结束音频
+                    
+                    // 过滤非 Hex 字符
                     if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'))) continue;
 
                     hexPair[pairIdx++] = c;
                     if (pairIdx == 2) {
                         pcmBuf[pcmIdx++] = (hexCharToVal(hexPair[0]) << 4) | hexCharToVal(hexPair[1]);
                         pairIdx = 0;
+                        // 缓冲区满，播放一段
                         if (pcmIdx == BUF_SIZE) {
                             MyAudio.playChunk(pcmBuf, BUF_SIZE);
                             pcmIdx = 0;
@@ -144,18 +150,25 @@ void AppServer::chatWithServer(Client* networkClient) {
                     if (idleCount > 50) vTaskDelay(1); 
                 }
             }
+            // 播放剩余的数据
             if (pcmIdx > 0) MyAudio.playChunk(pcmBuf, pcmIdx);
             
-            // [核心修复] 必须释放内存！
-            free(pcmBuf); 
+            free(pcmBuf); // 释放内存
         } else {
             Serial.println("[Server] Alloc Failed!");
         }
 
-        delay(50); 
-        digitalWrite(PIN_PA_EN, LOW);
+        // =========================================================
+        // [核心修复] 等待声音播完再关功放
+        // =========================================================
+        Serial.println("[Server] Waiting for audio drain...");
+        delay(1500); // 延时 1.5秒，确保 DMA 缓冲区里的声音全部从喇叭出来
+        
+        digitalWrite(PIN_PA_EN, LOW); // 关闭功放
         My4G.closeTCP();
+
     } else { 
+        // WiFi 模式逻辑 (如果您也用 WiFi，这里也要注意功放问题，不过目前重点是 4G)
         networkClient->stop(); 
     } 
 
