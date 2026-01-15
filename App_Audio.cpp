@@ -197,15 +197,51 @@ void AppAudio::playStream(Client* client, int length) {
     Serial.println("[Audio] Stream End");
 }
 
+// 替换 App_Audio.cpp 中的 playChunk 函数
 void AppAudio::playChunk(uint8_t* data, size_t len) {
     if (data == NULL || len == 0) return;
-    
-    size_t bytes_written;
-    // 调用 ESP32 原生 I2S 接口发送数据
-    // 注意：确保你的 init 函数里 I2S_PORT 是配置好的 (通常是 I2S_NUM_0)
-    i2s_write(I2S_NUM_0, data, len, &bytes_written, portMAX_DELAY);
-}
 
+    Serial.printf("[Audio] PlayChunk: %d bytes\n", len);
+
+    // 1. 【重要】手动开启功放（原代码漏了这句）
+    digitalWrite(PIN_PA_EN, HIGH);
+    delay(20); // 防爆破音
+
+    // 2. 单声道转立体声处理
+    // 原理：I2S 配置为立体声(2ch)，但数据是单声道(1ch)。
+    // 我们需要把每个采样点复制一份： L -> L+R
+    
+    // len 是字节数。16bit = 2字节。
+    // 样本数 = len / 2
+    size_t sample_count = len / 2; 
+    
+    // 为了节省内存，我们分批处理，不要一次性申请大内存
+    const int BATCH_SAMPLES = 256; 
+    int16_t stereo_batch[BATCH_SAMPLES * 2]; // 临时缓存：256个样本 * 2声道
+
+    int16_t *pcm_in = (int16_t*)data; // 将输入数据视为 16bit 数组
+
+    for (size_t i = 0; i < sample_count; i += BATCH_SAMPLES) {
+        // 计算当前批次处理多少个样本
+        size_t remain = sample_count - i;
+        size_t current_batch_size = (remain > BATCH_SAMPLES) ? BATCH_SAMPLES : remain;
+
+        // 【核心转换循环】
+        for (size_t j = 0; j < current_batch_size; j++) {
+            int16_t val = pcm_in[i + j]; // 读取 1 个单声道样本
+            stereo_batch[j * 2]     = val; // 左声道
+            stereo_batch[j * 2 + 1] = val; // 右声道 (复制)
+        }
+
+        // 写入 I2S，注意字节数是样本数 * 4 (2声道 * 2字节)
+        i2s.write((uint8_t*)stereo_batch, current_batch_size * 4);
+    }
+
+    // 3. 播放结束处理
+    writeSilence(50); // 冲刷缓冲区
+    digitalWrite(PIN_PA_EN, LOW); // 关闭功放省电
+    Serial.println("[Audio] Play Done");
+}
 
 void AppAudio::createWavHeader(uint8_t *header, uint32_t totalDataLen, uint32_t sampleRate, uint8_t sampleBits, uint8_t numChannels) {
     uint32_t byteRate = sampleRate * numChannels * (sampleBits / 8);

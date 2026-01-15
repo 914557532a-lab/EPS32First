@@ -47,7 +47,7 @@ void AppServer::sendBigEndianInt(Client* client, uint32_t val) {
     client->write(buf, 4);
 }
 
-// --- 核心逻辑 ---
+// --- [App_Server.cpp] 完整修复版 chatWithServer 函数 ---
 void AppServer::chatWithServer(Client* networkClient) {
     bool isWiFi = MyWiFi.isConnected(); 
     
@@ -73,7 +73,7 @@ void AppServer::chatWithServer(Client* networkClient) {
         return;
     }
 
-    // --- 发送逻辑 ---
+    // --- 1. 发送逻辑 ---
     uint32_t audioSize = MyAudio.record_data_len;
     uint8_t *audioData = MyAudio.record_buffer;
     Serial.printf("[Server] Sending Audio: %d bytes\n", audioSize);
@@ -84,7 +84,7 @@ void AppServer::chatWithServer(Client* networkClient) {
         networkClient->write(audioData, audioSize);
         networkClient->flush();
     } else {
-        // 4G 发送
+        // 4G 发送逻辑
         delay(500); 
         if (!sendIntManual(audioSize)) {
             Serial.println("[Server] 4G Send Length Failed!");
@@ -102,7 +102,7 @@ void AppServer::chatWithServer(Client* networkClient) {
                 sendOk = false; break;
             }
             sent += toSend;
-            delay(50); 
+            delay(50); // 发送包间隔
         }
         if (!sendOk) { My4G.closeTCP(); return; }
     }
@@ -110,12 +110,12 @@ void AppServer::chatWithServer(Client* networkClient) {
     Serial.println("[Server] Sent Done. Waiting for reply...");
     MyUILogic.updateAssistantStatus("思考中...");
 
-    // --- 接收逻辑 ---
+    // --- 2. 接收逻辑 ---
     uint32_t jsonLen = 0;
     uint32_t audioLen = 0;
     
     if (isWiFi) {
-        // WiFi 逻辑保持不变
+        // WiFi 逻辑 (保持原生 Stream 方式)
         if (readBigEndianInt(networkClient, &jsonLen)) { 
             if (jsonLen > 0) {
                  char *jsonBuf = (char*)malloc(jsonLen + 1);
@@ -138,13 +138,12 @@ void AppServer::chatWithServer(Client* networkClient) {
             }
         }
     } else {
-        // === 4G 接收逻辑 (先下载到内存，再播放) ===
+        // === 4G 接收逻辑 (强化安全版：防止看门狗重启) ===
         uint8_t lenBuf[4];
         
         Serial.println("[Server] 4G Waiting for JSON Header...");
-        if (My4G.readData(lenBuf, 4, 60000) == 4) { // 60秒等待
-            
-            // 1. JSON
+        // 1. 尝试读取 JSON 长度包头
+        if (My4G.readData(lenBuf, 4, 30000) == 4) { 
             jsonLen = (lenBuf[0] << 24) | (lenBuf[1] << 16) | (lenBuf[2] << 8) | lenBuf[3];
             Serial.printf("[Server] 4G JSON Len: %d\n", jsonLen);
             
@@ -153,54 +152,72 @@ void AppServer::chatWithServer(Client* networkClient) {
                 if (jsonBuf) {
                     if (My4G.readData((uint8_t*)jsonBuf, jsonLen, 5000) == jsonLen) {
                         jsonBuf[jsonLen] = 0;
-                        Serial.printf("[Server] JSON: %s\n", jsonBuf);
+                        Serial.printf("[Server] JSON Received: %s\n", jsonBuf);
                         MyUILogic.handleAICommand(String(jsonBuf)); 
                     }
                     free(jsonBuf);
                 }
             }
+
+            // 【关键保护】读完 JSON 强制休息一下，防止 CPU 霸占触发 WDT
+            vTaskDelay(pdMS_TO_TICKS(100)); 
             
-            // 2. 音频长度
+            // 2. 尝试读取音频长度包头
             Serial.println("[Server] 4G Waiting for Audio Header...");
-            if (My4G.readData(lenBuf, 4, 10000) == 4) {
-                audioLen = (lenBuf[0] << 24) | (lenBuf[1] << 16) | (lenBuf[2] << 8) | lenBuf[3];
-                Serial.printf("[Server] 4G Audio Len: %d\n", audioLen);
+            if (My4G.readData(lenBuf, 4, 15000) == 4) {
+                // 使用 int32_t 检查长度，防止乱码变负数
+                int32_t rawLen = (lenBuf[0] << 24) | (lenBuf[1] << 16) | (lenBuf[2] << 8) | lenBuf[3];
                 
-                MyUILogic.updateAssistantStatus("接收语音...");
-                
-                // 【关键修改】不要边收边播！先全部收下来！
-                // 我们直接复用 MyAudio.record_buffer 这个大内存
-                // 确保不要超过缓冲区大小
-                if (audioLen > AUDIO_BUFFER_SIZE) audioLen = AUDIO_BUFFER_SIZE;
-
-                size_t totalReceived = 0;
-                size_t chunk = 1024; // 每次读 1KB
-                bool rxSuccess = true;
-
-                while (totalReceived < audioLen) {
-                    size_t left = audioLen - totalReceived;
-                    size_t toRead = (left > chunk) ? chunk : left;
+                // 【核心防火墙】只有长度合法才进入下载循环
+                if (rawLen > 0 && rawLen < AUDIO_BUFFER_SIZE) {
+                    audioLen = (uint32_t)rawLen;
+                    Serial.printf("[Server] 4G Audio Len: %d bytes\n", audioLen);
                     
-                    // 只要还有数据，就拼命读，不阻塞去播放
-                    size_t actual = My4G.readData(MyAudio.record_buffer + totalReceived, toRead, 10000);
+                    MyUILogic.updateAssistantStatus("接收语音...");
                     
-                    if (actual > 0) {
-                        totalReceived += actual;
-                        // 打印个点，看进度
-                        if (totalReceived % 10240 == 0) Serial.print("."); 
-                    } else {
-                        Serial.println("\n[Server] 4G Read Audio Timeout/Error");
-                        rxSuccess = false;
-                        break;
+                    size_t totalReceived = 0;
+                    size_t chunk = 1024; 
+                    bool rxSuccess = true;
+                    unsigned long downloadStart = millis();
+
+                    // 下载大数据的安全循环
+                    while (totalReceived < audioLen) {
+                        // 【看门狗防重启 1】强制喂狗
+                        vTaskDelay(pdMS_TO_TICKS(1));
+
+                        // 【看门狗防重启 2】全局下载超时控制（30秒）
+                        if (millis() - downloadStart > 30000) {
+                            Serial.println("\n[Server] 4G Global Download Timeout!");
+                            rxSuccess = false;
+                            break;
+                        }
+
+                        size_t left = audioLen - totalReceived;
+                        size_t toRead = (left > chunk) ? chunk : left;
+                        
+                        // 这里的 readData 内部必须也包含 vTaskDelay(1)
+                        size_t actual = My4G.readData(MyAudio.record_buffer + totalReceived, toRead, 5000);
+                        
+                        if (actual > 0) {
+                            totalReceived += actual;
+                            // 每 20KB 打印一个点，进度可见且不阻塞
+                            if (totalReceived % 20480 == 0) Serial.print("."); 
+                        } else {
+                            Serial.println("\n[Server] 4G Read Data Error/Timeout");
+                            rxSuccess = false;
+                            break;
+                        }
                     }
-                }
-                Serial.println("\n[Server] 4G Download Complete.");
-                
-                // 3. 收完之后，一次性播放
-                if (rxSuccess) {
-                    MyUILogic.updateAssistantStatus("正在回复");
-                    Serial.println("[Server] Playing Audio from RAM...");
-                    MyAudio.playChunk(MyAudio.record_buffer, totalReceived);
+
+                    if (rxSuccess && totalReceived > 0) {
+                        Serial.println("\n[Server] 4G Download Success. Playing...");
+                        MyUILogic.updateAssistantStatus("正在回复");
+                        // 播放缓冲区里的数据
+                        MyAudio.playChunk(MyAudio.record_buffer, totalReceived);
+                    }
+                } else {
+                    // 如果解析出来的长度是天文数字或负数，直接跳过，防止死循环
+                    Serial.printf("[Server] 4G Invalid Audio Len: %d, aborting.\n", rawLen);
                 }
                 
             } else {
@@ -211,6 +228,14 @@ void AppServer::chatWithServer(Client* networkClient) {
         }
     }
 
-    if (isWiFi) networkClient->stop(); else My4G.closeTCP();
+    // --- 3. 资源清理 ---
+    if (isWiFi) {
+        networkClient->stop(); 
+    } else {
+        My4G.closeTCP();
+    }
+    
+    // 恢复 UI 状态（隐藏助手面板等）
     MyUILogic.finishAIState();
+    Serial.println("[Server] Transaction Complete.");
 }

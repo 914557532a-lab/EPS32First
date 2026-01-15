@@ -23,7 +23,7 @@
 
 // --- 方案 A: 你的 cpolar 公网地址 (车载/远程使用) ---
 #define SERVER_HOST  "35.tcp.cpolar.top"
-#define SERVER_PORT  10985 
+#define SERVER_PORT  11904 
 
 // --- 方案 B: 本地局域网地址 (开发/调试使用) ---
 // #define SERVER_HOST  "192.168.1.53"

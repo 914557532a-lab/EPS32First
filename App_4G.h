@@ -1,3 +1,7 @@
+/**
+ * @file App_4G.h
+ * @brief 4G控制头文件 (已修复 checkBaudrate 声明)
+ */
 #ifndef APP_4G_H
 #define APP_4G_H
 
@@ -41,6 +45,9 @@ private:
     // 辅助函数
     bool waitResponse(String expected, int timeout);
     bool checkIP_manual(); 
+    
+    // 【关键修复】这里补上了 checkBaudrate 的声明
+    bool checkBaudrate(uint32_t baud);
 };
 
 extern App4G My4G;
