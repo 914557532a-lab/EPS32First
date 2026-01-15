@@ -44,32 +44,55 @@ bool App4G::checkBaudrate(uint32_t baud) {
 void App4G::powerOn() {
     digitalWrite(PIN_4G_PWR, HIGH); delay(500);
 
-    // 锁定 115200 波特率 (最稳)
-    uint32_t targetBaud = 115200; 
+    // [修改] 降级到 921600
+    // 虽然比理论值 96KB/s 略低一点点，但稳定性更好
+    uint32_t targetBaud = 921600; 
     
-    // 必须先 begin
+    // 1. 先尝试以目标波特率 (921600) 初始化
     _serial4G->begin(targetBaud, SERIAL_8N1, PIN_4G_RX, PIN_4G_TX);
     delay(100);
 
-    Serial.println("[4G] Trying to sync baudrate...");
+    Serial.println("[4G] Trying to sync baudrate (Target: 921600)...");
+
+    // 2. 检查当前是否已经是 921600
     if (!checkBaudrate(targetBaud)) {
-        if (checkBaudrate(460800)) {
-            _serial4G->printf("AT+IPR=%d\r\n", targetBaud); delay(200);
-        } else if (checkBaudrate(921600)) {
-            _serial4G->printf("AT+IPR=%d\r\n", targetBaud); delay(200);
-        } else {
-            // 硬件复位
+        Serial.println("[4G] Target baud failed, scanning other rates...");
+        
+        // 3. 扫描：如果模块还在 2000000 (上次设置的)，把它降下来
+        if (checkBaudrate(2000000)) {
+            Serial.println("[4G] Found at 2M, downgrading to 921600...");
+            _serial4G->printf("AT+IPR=%d\r\n", targetBaud); 
+            delay(200); 
+        } 
+        // 4. 扫描：如果是出厂默认 115200，把它升上去
+        else if (checkBaudrate(115200)) {
+            Serial.println("[4G] Found at 115200, upgrading to 921600...");
+            _serial4G->printf("AT+IPR=%d\r\n", targetBaud); 
+            delay(200);
+        }
+        else {
+            // 5. 实在连不上，硬件复位
             Serial.println("[4G] Hard Resetting...");
             pinMode(PIN_4G_PWRKEY, OUTPUT);
             digitalWrite(PIN_4G_PWRKEY, HIGH); delay(100);
             digitalWrite(PIN_4G_PWRKEY, LOW);  delay(2500);
             digitalWrite(PIN_4G_PWRKEY, HIGH); pinMode(PIN_4G_PWRKEY, INPUT);
-            delay(10000);
+            delay(10000); 
         }
     }
     
+    // 6. 更新 ESP32 串口速度
     _serial4G->updateBaudRate(targetBaud);
-    _serial4G->println("AT"); waitResponse("OK", 1000);
+    delay(50);
+    
+    // 7. 最终确认
+    _serial4G->println("AT"); 
+    if (waitResponse("OK", 1000)) {
+        Serial.printf("[4G] Synced at %d baud!\n", targetBaud);
+    } else {
+        Serial.println("[4G] Warning: Sync Failed.");
+    }
+
     _serial4G->println("ATE0"); waitResponse("OK", 500); 
 
     if (_modem == nullptr) _modem = new TinyGsm(*_serial4G);

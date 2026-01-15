@@ -8,7 +8,7 @@
 #include <Arduino.h>
 #include <WiFi.h> // 需要引用以支持 Client (或者 <Client.h>)
 
-#define AUDIO_SAMPLE_RATE  24000 
+#define AUDIO_SAMPLE_RATE  16000 
 #define AUDIO_BUFFER_SIZE 512000
 class AppAudio {
 public:

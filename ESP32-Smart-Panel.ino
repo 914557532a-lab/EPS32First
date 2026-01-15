@@ -232,7 +232,7 @@ void Task433_Code(void *pvParameters) {
 
 // ================= Setup =================
 void setup() {
-    Serial.begin(115200);
+    Serial.begin(921600);
     delay(2000);
     Serial.println("\n\n>>> ESP32 Smart Panel Booting... <<<");
     Serial.printf("Server: %s:%d\n", SERVER_HOST, SERVER_PORT);
