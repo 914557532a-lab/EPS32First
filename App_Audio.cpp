@@ -1,6 +1,6 @@
 /**
  * @file App_Audio.cpp
- * @brief 音频实现 - 环形缓冲流式播放 (低延迟 + 高抗抖动)
+ * @brief 音频实现 - 环形缓冲流式播放 (修复宏冲突与阻塞写入)
  */
 #include "App_Audio.h"
 #include "Pin_Config.h" 
@@ -16,7 +16,7 @@ static I2SStream i2s;
 // =========================================================
 // [核心组件] PSRAM 环形缓冲区 (Ring Buffer)
 // =========================================================
-// 定义 256KB 的环形缓冲区，足够抗网络抖动
+// 256KB 缓冲区
 #define STREAM_BUFFER_SIZE (256 * 1024)
 
 uint8_t* g_ringBuf = NULL;    // 指向 PSRAM
@@ -39,8 +39,7 @@ void writeSilence(int ms) {
         int to_write = (bytes > 128) ? 128 : bytes;
         i2s.write(silence, to_write);
         bytes -= to_write;
-        // 只有大量静音时才延时，避免影响正常播放流
-        if (bytes > 1024) vTaskDelay(pdMS_TO_TICKS(1));
+        if (bytes > 4096) vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
@@ -69,7 +68,6 @@ void recordTaskWrapper(void *param) {
     audio->_recordTask(NULL); vTaskDelete(NULL);
 }
 
-// [新增] 专门的流播放任务包装器
 void streamPlayTaskWrapper(void *param) {
     AppAudio *audio = (AppAudio *)param;
     audio->_playTask(NULL);
@@ -97,7 +95,8 @@ void AppAudio::init() {
     if (board.begin(cfg)) Serial.println("[Audio] Codec OK");
     else Serial.println("[Audio] Codec FAIL");
 
-    board.setVolume(25); board.setInputVolume(0); 
+    board.setVolume(25); // 默认音量
+    board.setInputVolume(0); 
 
     auto config = i2s.defaultConfig(RXTX_MODE); 
     config.pin_bck = PIN_I2S_BCLK;
@@ -143,28 +142,40 @@ void AppAudio::streamStart() {
     g_isStreaming = true; 
     g_streamEnding = false;
     xSemaphoreGive(g_mutex);
-    Serial.println("[Audio] Stream Start. Buffer Cleared.");
+    Serial.println("[Audio] Stream Start.");
 }
 
+// [修复] 阻塞式写入，防止数据丢失
 void AppAudio::streamWrite(uint8_t* data, size_t len) {
     if (!g_ringBuf || len == 0) return;
 
-    xSemaphoreTake(g_mutex, portMAX_DELAY);
+    size_t written = 0;
     
-    size_t spaceFree = STREAM_BUFFER_SIZE - g_count;
-    if (len > spaceFree) {
-        // 缓冲区满，这是异常情况，一般不会发生
-        len = spaceFree; 
+    // 循环直到所有数据都写入缓冲区
+    while (written < len) {
+        xSemaphoreTake(g_mutex, portMAX_DELAY);
+        
+        size_t spaceFree = STREAM_BUFFER_SIZE - g_count;
+        
+        if (spaceFree > 0) {
+            // 本次能写的量
+            size_t toWrite = (len - written) > spaceFree ? spaceFree : (len - written);
+            
+            // 环形写入
+            for (size_t i = 0; i < toWrite; i++) {
+                g_ringBuf[g_head] = data[written++];
+                g_head = (g_head + 1) % STREAM_BUFFER_SIZE;
+            }
+            g_count += toWrite;
+            
+            xSemaphoreGive(g_mutex);
+        } else {
+            // 缓冲区满了，解锁并等待播放器消费
+            xSemaphoreGive(g_mutex);
+            // 等待时间根据写入压力调整，2ms 比较合适
+            vTaskDelay(pdMS_TO_TICKS(2));
+        }
     }
-
-    // 写入环形缓冲区
-    for (size_t i = 0; i < len; i++) {
-        g_ringBuf[g_head] = data[i];
-        g_head = (g_head + 1) % STREAM_BUFFER_SIZE;
-    }
-    g_count += len;
-    
-    xSemaphoreGive(g_mutex);
 }
 
 void AppAudio::streamEnd() {
@@ -176,23 +187,29 @@ void AppAudio::streamEnd() {
 
 // [最关键的任务] 后台播放任务
 void AppAudio::_playTask(void *param) {
-    // 预缓冲阈值：
-    // 24kHz * 2通道 * 2字节 = 96000 bytes/s
-    // 设为 24000 bytes，约为 0.25秒延迟。既流畅又快。
-    const uint32_t START_THRESHOLD = 24000; 
+    // 预缓冲阈值
+    const uint32_t START_THRESHOLD = 19200; 
     
-    // [修复] 重命名变量，避免与 AudioTools 库的宏定义冲突
-    const size_t PLAY_CHUNK_SIZE = 512; 
+    // [修复] 重命名为 PLAY_CHUNK_SIZE，避免与 AudioTools 库的 CHUNK_SIZE 宏冲突
+    const size_t PLAY_CHUNK_SIZE = 256; 
     uint8_t tempBuf[PLAY_CHUNK_SIZE];
     
-    // 立体声转换缓冲
-    int16_t stereoBuf[PLAY_CHUNK_SIZE]; // 512字节单声道 -> 1024字节立体声
-
+    // 立体声转换缓冲 (int16_t 数组，大小足够容纳双通道样本)
+    // 256字节单声道数据 = 128个样本。立体声需要 128*2 = 256 个样本。
+    // 所以 int16_t[256] 刚好够用。
+    int16_t stereoBuf[PLAY_CHUNK_SIZE]; 
+    
     bool isPlaying = false;
 
     for (;;) {
         // 如果未处于流模式，休息
         if (!g_isStreaming) {
+            if (isPlaying) {
+                // 刚结束一次播放
+                writeSilence(50);
+                digitalWrite(PIN_PA_EN, LOW);
+                isPlaying = false;
+            }
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
@@ -202,25 +219,24 @@ void AppAudio::_playTask(void *param) {
         bytesAvailable = g_count;
         xSemaphoreGive(g_mutex);
 
-        // 状态机逻辑
+        // 1. 状态：缓冲中 (Buffering)
         if (!isPlaying) {
-            // 状态：缓冲中
-            // 开始播放条件：数据够了 OR 流已经结束了(短回复)
+            // 开始播放条件：数据够了 OR 流已经标记结束(短语音)
             if (bytesAvailable > START_THRESHOLD || (g_streamEnding && bytesAvailable > 0)) {
                 Serial.printf("[Audio] Playing... (Buffered: %d)\n", bytesAvailable);
                 digitalWrite(PIN_PA_EN, HIGH); 
-                vTaskDelay(20); // 开启功放
+                vTaskDelay(20); // 等待功放开启稳定
                 isPlaying = true;
             } else {
-                // 数据不够，继续等待
+                // 数据不够，继续等待写入
                 vTaskDelay(pdMS_TO_TICKS(5));
                 continue;
             }
         }
 
-        // 状态：播放中
+        // 2. 状态：播放中 (Playing)
         if (bytesAvailable > 0) {
-            // 1. 从环形缓冲取数据
+            // (A) 从环形缓冲取数据
             size_t readLen = (bytesAvailable > PLAY_CHUNK_SIZE) ? PLAY_CHUNK_SIZE : bytesAvailable;
             
             xSemaphoreTake(g_mutex, portMAX_DELAY);
@@ -231,33 +247,33 @@ void AppAudio::_playTask(void *param) {
             g_count -= readLen;
             xSemaphoreGive(g_mutex);
 
-            // 2. 单声道转立体声
-            size_t sampleCount = readLen / 2; // 16bit samples
+            // (B) 单声道 PCM (16bit) 转 立体声 I2S (16bit * 2)
+            // tempBuf 是小端序的 PCM 数据
+            size_t sampleCount = readLen / 2; // 样本数
             int16_t* pIn = (int16_t*)tempBuf;
+            
+            // 构造立体声数据
+            // I2S 需要: L-Sample(2B), R-Sample(2B), L-Sample...
             for (size_t i = 0; i < sampleCount; i++) {
-                stereoBuf[i*2] = pIn[i];
-                stereoBuf[i*2+1] = pIn[i];
+                int16_t val = pIn[i];
+                stereoBuf[i*2]     = val; // Left
+                stereoBuf[i*2 + 1] = val; // Right
             }
 
-            // 3. 写入 I2S (这里会阻塞，直到 DMA 接受数据)
-            // 独立任务阻塞不影响网络下载
+            // (C) 写入 I2S (阻塞直到 DMA 接受)
+            // write 接收的是字节长度：样本数 * 2通道 * 2字节 = sampleCount * 4
             i2s.write((uint8_t*)stereoBuf, sampleCount * 4);
 
         } else {
             // 缓冲区空了
             if (g_streamEnding) {
-                // 彻底播完了
+                // 数据读完了，且流标记结束 -> 彻底结束
                 Serial.println("[Audio] Playback Finished.");
-                writeSilence(50); // 消除尾音
-                digitalWrite(PIN_PA_EN, LOW); // 关功放
-                
                 xSemaphoreTake(g_mutex, portMAX_DELAY);
-                g_isStreaming = false;
-                isPlaying = false;
-                g_streamEnding = false;
+                g_isStreaming = false; // 回到待机状态
                 xSemaphoreGive(g_mutex);
             } else {
-                // 流还没结束，但数据断了 -> 网络卡顿 (Buffering...)
+                // 流没结束，但缓冲区空了 -> 网络卡顿 (Underrun)
                 // 保持功放开启，等待数据
                 vTaskDelay(pdMS_TO_TICKS(2));
             }
@@ -281,7 +297,7 @@ void AppAudio::stopRecording() {
     delay(100); 
     board.setInputVolume(0); 
     uint32_t pcm_size = record_data_len - 44;
-    createWavHeader(record_buffer, pcm_size, AUDIO_SAMPLE_RATE, 16, 2);
+    createWavHeader(record_buffer, pcm_size, AUDIO_SAMPLE_RATE, 16, 2); // 录音是双通道
 }
 
 void AppAudio::_recordTask(void *param) {
@@ -298,31 +314,9 @@ void AppAudio::_recordTask(void *param) {
     }
 }
 
-// 兼容旧接口 (PlayStream / PlayChunk) - 简单封装
-void AppAudio::playStream(Client* client, int length) {
-    // 流式版本暂不使用此阻塞接口
-}
-
-// 兼容 4G 非流式调用
-void AppAudio::playChunk(uint8_t* data, size_t len) {
-    // 为了兼容性，这里只是简单播放，建议4G也改用 streamWrite
-    // 但如果必须用，保持之前的实现：
-    if (data == NULL || len == 0) return;
-    size_t sample_count = len / 2; 
-    const int BATCH_SAMPLES = 256; 
-    int16_t stereo_batch[BATCH_SAMPLES * 2]; 
-    int16_t *pcm_in = (int16_t*)data; 
-    for (size_t i = 0; i < sample_count; i += BATCH_SAMPLES) {
-        size_t remain = sample_count - i;
-        size_t current_batch_size = (remain > BATCH_SAMPLES) ? BATCH_SAMPLES : remain;
-        for (size_t j = 0; j < current_batch_size; j++) {
-            int16_t val = pcm_in[i + j]; 
-            stereo_batch[j * 2] = val; stereo_batch[j * 2 + 1] = val; 
-        }
-        i2s.write((uint8_t*)stereo_batch, current_batch_size * 4);
-        if (i % 512 == 0) vTaskDelay(pdMS_TO_TICKS(1)); 
-    }
-}
+// 兼容旧接口
+void AppAudio::playStream(Client* client, int length) {}
+void AppAudio::playChunk(uint8_t* data, size_t len) {}
 
 void AppAudio::createWavHeader(uint8_t *header, uint32_t totalDataLen, uint32_t sampleRate, uint8_t sampleBits, uint8_t numChannels) {
     uint32_t byteRate = sampleRate * numChannels * (sampleBits / 8);
@@ -354,7 +348,6 @@ void AppAudio::createWavHeader(uint8_t *header, uint32_t totalDataLen, uint32_t 
     header[43] = (uint8_t)((totalDataLen >> 24) & 0xFF);
 }
 
-// 提示音接口
 void AppAudio::playToneAsync(int freq, int duration_ms) {
     ToneParams *params = (ToneParams*)malloc(sizeof(ToneParams));
     if(params) {

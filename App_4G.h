@@ -6,58 +6,51 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+// 使用 SIM7600 驱动定义，兼容 LE270 系列的常用 AT 指令
 #define TINY_GSM_MODEM_SIM7600 
 #include <TinyGsmClient.h>
 
-// 状态机状态定义
+/**
+ * @brief 接收状态机枚举
+ * 用于在字节流中精准定位 +MIPREAD 的数据主体
+ */
 enum RxState {
-    ST_SEARCH,
-    ST_SKIP_ID,
-    ST_READ_LEN,
-    ST_READ_DATA
+    ST_SEARCH,        // 寻找起始符号 '+'
+    ST_MATCH_HEADER,  // 匹配关键字 (如 +MIPREAD: 或 +MIPPUSH:)
+    ST_SKIP_ID,       // 跳过连接 ID
+    ST_READ_LEN,      // 解析后续数据长度
+    ST_READ_DATA      // 读取原始二进制数据
 };
 
 class App4G {
 public:
     void init(); 
     void powerOn();
-    
-    // TCP 相关
     bool connectTCP(const char* host, uint16_t port);
     void closeTCP();
-
-    // 发送函数重载
+    
+    // 发送数据接口
     bool sendData(const uint8_t* data, size_t len);
     bool sendData(uint8_t* data, size_t len);
-
-    // [核心] 智能读取 (非阻塞/缓冲/支持超时)
+    
+    // 核心读取接口：支持主动轮询与超时处理
     int  readData(uint8_t* buf, size_t maxLen, uint32_t timeout_ms);
-
-    // 状态机处理
+    
+    // 状态机处理逻辑
     void process4GStream();
-    int popCache();
-    void resetParser();
-
-    // 辅助功能
+    int  popCache();
+    
     bool isConnected();
     TinyGsmClient& getClient(); 
     HardwareSerial* getClientSerial() { return _serial4G; }
 
-    // =============================================================
-    // 内联实现兼容性接口 (解决 .ino 报错)
-    // =============================================================
+    // 基础连接检测
     bool connect(unsigned long timeout_ms = 15000L) {
         unsigned long start = millis();
-        Serial.print("[4G] Checking Network... ");
         while (millis() - start < timeout_ms) {
-            if (_modem && _modem->isNetworkConnected()) {
-                Serial.println("OK! (Connected)");
-                return true;
-            }
-            Serial.print(".");
+            if (_modem && _modem->isNetworkConnected()) return true;
             vTaskDelay(pdMS_TO_TICKS(1000)); 
         }
-        Serial.println(" Timeout!");
         return false;
     }
 
@@ -69,13 +62,12 @@ private:
     HardwareSerial* _serial4G = &Serial2; 
     TinyGsm* _modem = nullptr;
     TinyGsmClient* _client = nullptr;
-
-    RxState g_st = ST_SEARCH;
     
-    // [新增] 贪婪读取标志：标记缓冲区虽空但可能仍有数据在网络侧
+    // 解析状态机变量
+    RxState g_st = ST_SEARCH;
     bool _has_pending_data = false;
-
-    // 内部函数
+    
+    // 内部辅助函数
     bool waitResponse(const char* expected, uint32_t timeout);
     bool checkBaudrate(uint32_t baud);
 };
