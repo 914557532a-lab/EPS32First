@@ -62,74 +62,69 @@ bool App4G::checkBaudrate(uint32_t baud) {
 }
 
 void App4G::powerOn() {
-    digitalWrite(PIN_4G_PWR, HIGH); delay(500);
+    // 1. 开启电源
+    digitalWrite(PIN_4G_PWR, HIGH); 
+    delay(500);
     
-    uint32_t targetBauds[] = {2000000, 921600};
-    uint32_t finalBaud = 0;
-
+    // 2. 初始化串口，加大驱动层缓冲防止溢出
     _serial4G->begin(115200, SERIAL_8N1, PIN_4G_RX, PIN_4G_TX);
-    _serial4G->setRxBufferSize(8192); // 加大驱动层缓冲
+    _serial4G->setRxBufferSize(8192); 
     delay(100);
 
-    Serial.println("[4G] Syncing...");
+    Serial.println("[4G] Syncing at 115200...");
 
+    // 3. 尝试同步波特率
     uint32_t foundBaud = 0;
-    uint32_t scanBauds[] = {115200, 921600, 2000000, 1500000, 3000000};
+    uint32_t scanBauds[] = {115200, 921600, 2000000}; // 扫描列表
     
     for (uint32_t b : scanBauds) {
-        if (checkBaudrate(b)) { foundBaud = b; break; }
+        if (checkBaudrate(b)) { 
+            foundBaud = b; 
+            break; 
+        }
     }
 
+    // 4. 如果没同步上，执行硬件复位
     if (foundBaud == 0) {
         Serial.println("[4G] Sync failed, Hard Resetting...");
         pinMode(PIN_4G_PWRKEY, OUTPUT);
         digitalWrite(PIN_4G_PWRKEY, HIGH); delay(100);
         digitalWrite(PIN_4G_PWRKEY, LOW);  delay(2500);
         digitalWrite(PIN_4G_PWRKEY, HIGH); pinMode(PIN_4G_PWRKEY, INPUT);
-        delay(6000); 
+        delay(6000); // 等待开机
         foundBaud = 115200;
     }
 
     Serial.printf("[4G] Found module at %d\n", foundBaud);
     
-    bool success = false;
-    for (uint32_t t : targetBauds) {
-        if (foundBaud == t) { finalBaud = t; success = true; break; }
-        
-        Serial.printf("[4G] Switching to %d...\n", t);
-        _serial4G->printf("AT+IPR=%d\r\n", t);
-        delay(200); 
-        _serial4G->begin(t, SERIAL_8N1, PIN_4G_RX, PIN_4G_TX); 
+    // 5. [核心修改]：如果发现的不是 115200，则强制将其切回 115200
+    if (foundBaud != 115200) {
+        Serial.println("[4G] Switching module back to 115200 for stability...");
+        _serial4G->updateBaudRate(foundBaud);
+        delay(50);
+        _serial4G->println("AT+IPR=115200"); // 设置模块波特率
+        delay(200);
+        _serial4G->begin(115200, SERIAL_8N1, PIN_4G_RX, PIN_4G_TX);
+        _serial4G->println("AT&W"); // 保存配置到模块 NV
         delay(100);
-
-        if (checkBaudrate(t)) {
-            finalBaud = t;
-            success = true;
-            _serial4G->println("AT&W"); 
-            break;
-        } else {
-            _serial4G->begin(foundBaud, SERIAL_8N1, PIN_4G_RX, PIN_4G_TX);
-            delay(100);
-            checkBaudrate(foundBaud); 
-        }
-    }
-    
-    if (!success) {
-        finalBaud = foundBaud;
-        _serial4G->begin(finalBaud, SERIAL_8N1, PIN_4G_RX, PIN_4G_TX);
+    } else {
+        _serial4G->begin(115200, SERIAL_8N1, PIN_4G_RX, PIN_4G_TX);
     }
 
+    // 6. 基础环境配置
     delay(100);
-    _serial4G->println("ATE0"); waitResponse("OK", 500); 
-    _serial4G->println("AT+CSCLK=0"); waitResponse("OK", 500);
+    _serial4G->println("ATE0");       waitResponse("OK", 500); // 关闭回显
+    _serial4G->println("AT+CSCLK=0"); waitResponse("OK", 500); // 禁用休眠
 
+    // 7. 初始化 TinyGSM 对象
     if (_modem == nullptr) _modem = new TinyGsm(*_serial4G);
     if (_client == nullptr) _client = new TinyGsmClient(*_modem);
     
     _has_pending_data = false;
     g_needManualRead = false;
+    
+    Serial.println("[4G] Power on and locked at 115200 OK.");
 }
-
 bool App4G::connectTCP(const char* host, uint16_t port) {
     rxHead = rxTail = 0; 
     g_st = ST_SEARCH;    

@@ -133,7 +133,7 @@ void AppServer::chatWithServer(Client* networkClient) {
     // =================================================================================
     // 2.1 读取 JSON 长度
     // 给予较长超时 (15s)，因为 AI 分析和生成需要时间
-    if (!readBytesFixed(networkClient, isWiFi, lenBuf, 4, 15000)) goto _EXIT_ERROR; 
+    if (!readBytesFixed(networkClient, isWiFi, lenBuf, 4, 30000)) goto _EXIT_ERROR; 
     
     // 解析大端序长度
     jsonLen = (lenBuf[0] << 24) | (lenBuf[1] << 16) | (lenBuf[2] << 8) | lenBuf[3];
