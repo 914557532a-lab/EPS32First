@@ -9,12 +9,17 @@ class AppServer {
 public:
     void init(const char* ip, uint16_t port);
     
-    // 核心交互逻辑 (支持 WiFiClient 和 TinyGsmClient)
+    // [核心修改] 参数改为 Client* 以兼容 WiFiClient 和 TinyGsmClient
     void chatWithServer(Client* networkClient);
 
 private:
     const char* _server_ip;
     uint16_t _server_port;
+
+    // [核心修改] 辅助函数也全部改为 Client* 指针
+    bool waitForData(Client* client, size_t len, uint32_t timeout_ms);
+    bool readBigEndianInt(Client* client, uint32_t *val);
+    void sendBigEndianInt(Client* client, uint32_t val);
 };
 
 extern AppServer MyServer;

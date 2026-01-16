@@ -3,237 +3,196 @@
 #include "App_UI_Logic.h" 
 #include "App_4G.h"       
 #include "App_WiFi.h"     
-#include "Pin_Config.h"   
+#include "Pin_Config.h"   // [关键] 必须引入这个才能控制功放引脚
 
 AppServer MyServer;
+
+// 辅助函数：Hex字符转数值
+static uint8_t hexCharToVal(uint8_t c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return 0;
+}
 
 void AppServer::init(const char* ip, uint16_t port) {
     _server_ip = ip;
     _server_port = port;
 }
 
-// [辅助函数] 从网络读取指定长度的原始字节
-// 兼容 WiFiClient 和 App4G，带有超时重试机制，确保读够 len 个字节
-bool readBytesFixed(Client* client, bool isWiFi, uint8_t* buf, size_t len, uint32_t timeout_ms) {
-    size_t received = 0;
-    uint32_t start = millis();
-    
-    while (received < len && (millis() - start < timeout_ms)) {
-        int n = 0;
-        if (isWiFi) {
-            if (client->available()) {
-                // WiFiClient 的 read(buf, len) 返回实际读取字节数
-                n = client->read(buf + received, len - received);
-            } else {
-                // 等待数据到达，避免空转
-                vTaskDelay(pdMS_TO_TICKS(5));
-            }
-        } else {
-            // 4G 模块读取 (App4G 内部实现了缓冲和 AT 指令读取)
-            // 每次请求适量数据，防止底层 buffer 溢出或超时
-            size_t chunk = len - received;
-            if (chunk > 512) chunk = 512; 
-            
-            // 调用 App4G 的 readData，timeout 设为短时间，由外层循环控制总超时
-            n = My4G.readData(buf + received, chunk, 50); 
-        }
-
-        if (n > 0) {
-            received += n;
-            start = millis(); // 每次读到数据都重置超时，适应慢速网络
-        } else {
-             // 如果没读到数据，短暂延时
-             vTaskDelay(pdMS_TO_TICKS(10));
-        }
-    }
-    
-    if (received < len) {
-        Serial.printf("[Server] Read Timeout/Fail. Want: %d, Got: %d\n", len, received);
-        return false;
-    }
-    return true;
+// 辅助函数：手动发送整数（用于 4G 模式）
+bool sendIntManual(uint32_t val) {
+    uint8_t buf[4];
+    buf[0] = (val >> 24); buf[1] = (val >> 16); buf[2] = (val >> 8); buf[3] = (val);
+    return My4G.sendData(buf, 4);
 }
 
-// [辅助函数] 发送原始数据
-bool sendDataFixed(Client* client, bool isWiFi, const uint8_t* buf, size_t len) {
-    if (isWiFi) {
-        size_t sent = 0;
-        while (sent < len) {
-            size_t chunk = 1024;
-            if (len - sent < chunk) chunk = len - sent;
-            if (client->write(buf + sent, chunk) != chunk) return false;
-            sent += chunk;
-            client->flush(); 
-        }
-        return true;
-    } else {
-        // 4G 发送
-        size_t sent = 0;
-        while (sent < len) {
-            // 4G 模块建议分块发送，避免 AT 指令缓冲区溢出
-            size_t chunk = 512; 
-            if (len - sent < chunk) chunk = len - sent;
-            if (!My4G.sendData(buf + sent, chunk)) return false;
-            sent += chunk;
-        }
-        return true;
-    }
-}
-
+// =================================================================================
+// 核心逻辑：星号协议版 (*)
+// =================================================================================
 void AppServer::chatWithServer(Client* networkClient) {
     bool isWiFi = MyWiFi.isConnected(); 
-    
-    // [修复] 变量声明全部移到函数开头，防止 goto 跳过初始化导致编译错误
-    uint32_t audioSize = 0;
-    uint8_t lenBuf[4] = {0};
-    uint32_t jsonLen = 0;
-    uint32_t audioLen = 0;
-    char* jsonBuf = NULL;
-    uint8_t* downBuf = NULL;
-    bool connected = false;
-
     Serial.printf("[Server] Connect %s:%d (%s)...\n", _server_ip, _server_port, isWiFi?"WiFi":"4G");
     MyUILogic.updateAssistantStatus("连接中...");
 
-    if (isWiFi) connected = networkClient->connect(_server_ip, _server_port);
-    else connected = My4G.connectTCP(_server_ip, _server_port);
+    bool connected = false;
 
+    // 1. 尝试连接服务器
+    if (isWiFi) { 
+        connected = networkClient->connect(_server_ip, _server_port);
+    } else { 
+        connected = My4G.connectTCP(_server_ip, _server_port);
+    }
+
+    // [错误处理] 如果连接失败，明确报错并退出，防止 UI 卡死
     if (!connected) {
-        Serial.println("ERR: Conn Fail"); 
+        Serial.println("[Server] Connection Failed!");
         MyUILogic.updateAssistantStatus("服务器连不上");
-        vTaskDelay(pdMS_TO_TICKS(2000)); 
-        if (!isWiFi) My4G.closeTCP(); 
-        MyUILogic.finishAIState();    
+        vTaskDelay(2000); // 停留一下让用户看清提示
+        
+        if (!isWiFi) My4G.closeTCP(); // 确保清理连接
+        MyUILogic.finishAIState();    // 退出 AI 界面
         return;
     }
 
-    // =================================================================================
-    // 1. 发送录音 (Protocol: [Len 4B] + [Data])
-    // =================================================================================
-    audioSize = MyAudio.record_data_len;
+    // 2. 发送音频数据
+    uint32_t audioSize = MyAudio.record_data_len;
     MyUILogic.updateAssistantStatus("发送指令...");
     
-    Serial.printf("[Server] Uploading %d bytes...\n", audioSize);
-
-    // 1.1 发送长度 (4字节大端序，匹配 Python 的 struct.unpack('>I'))
-    lenBuf[0] = (uint8_t)((audioSize >> 24) & 0xFF);
-    lenBuf[1] = (uint8_t)((audioSize >> 16) & 0xFF);
-    lenBuf[2] = (uint8_t)((audioSize >> 8) & 0xFF);
-    lenBuf[3] = (uint8_t)(audioSize & 0xFF);
-
-    if (!sendDataFixed(networkClient, isWiFi, lenBuf, 4)) goto _EXIT_ERROR;
-
-    // 1.2 发送音频实体
-    if (!sendDataFixed(networkClient, isWiFi, MyAudio.record_buffer, audioSize)) goto _EXIT_ERROR;
-
-    MyUILogic.updateAssistantStatus("思考中...");
-    
-    // =================================================================================
-    // 2. 接收 JSON (Protocol: [Len 4B] + [Data])
-    // =================================================================================
-    // 2.1 读取 JSON 长度
-    // 给予较长超时 (15s)，因为 AI 分析和生成需要时间
-    if (!readBytesFixed(networkClient, isWiFi, lenBuf, 4, 30000)) goto _EXIT_ERROR; 
-    
-    // 解析大端序长度
-    jsonLen = (lenBuf[0] << 24) | (lenBuf[1] << 16) | (lenBuf[2] << 8) | lenBuf[3];
-    Serial.printf("[Server] JSON Len: %d\n", jsonLen);
-
-    // 2.2 读取 JSON 数据
-    if (jsonLen > 0 && jsonLen < 32768) { // 安全限制
-        jsonBuf = (char*)malloc(jsonLen + 1);
-        if (!jsonBuf) { Serial.println("ERR: OOM JSON"); goto _EXIT_ERROR; }
-        
-        if (!readBytesFixed(networkClient, isWiFi, (uint8_t*)jsonBuf, jsonLen, 5000)) {
-            goto _EXIT_ERROR; // 标签处会释放 jsonBuf
-        }
-        jsonBuf[jsonLen] = 0; // 字符串结束符
-        Serial.printf("[Server] JSON: %s\n", jsonBuf);
-        
-        // 执行指令逻辑
-        MyUILogic.handleAICommand(String(jsonBuf));
-        free(jsonBuf); jsonBuf = NULL; // 用完及时释放
-    } else if (jsonLen > 0) {
-        Serial.println("ERR: JSON too large, skip.");
-        // 如果 JSON 太大，这里最好断开连接，因为很难精准跳过
-        goto _EXIT_ERROR; 
-    }
-
-    // =================================================================================
-    // 3. 接收音频 (Protocol: [Len 4B] + [Data])
-    // =================================================================================
-    MyUILogic.updateAssistantStatus("正在接收...");
-    
-    // 3.1 读取 Audio 长度
-    if (!readBytesFixed(networkClient, isWiFi, lenBuf, 4, 5000)) goto _EXIT_ERROR;
-    
-    audioLen = (lenBuf[0] << 24) | (lenBuf[1] << 16) | (lenBuf[2] << 8) | lenBuf[3];
-    Serial.printf("[Server] Audio Len: %d\n", audioLen);
-
-    if (audioLen > 0) {
-        // 3.2 接收音频数据
-        // 策略：直接下载到 PSRAM (bufferAll) 然后播放。
-        downBuf = (uint8_t*)ps_malloc(audioLen);
-        if (!downBuf) {
-            Serial.println("ERR: PSRAM OOM for Audio");
-            goto _EXIT_ERROR;
+    if (isWiFi) { 
+        // WiFi 模式发送
+        networkClient->print(String(audioSize) + "\n");
+        networkClient->write(MyAudio.record_buffer, audioSize);
+    } 
+    else {
+        // 4G 模式发送
+        delay(200);
+        // 先发送长度
+        if(!sendIntManual(audioSize)) { 
+            Serial.println("[4G] Send Len Failed");
+            MyUILogic.updateAssistantStatus("发送失败");
+            My4G.closeTCP(); 
+            MyUILogic.finishAIState();
+            return; 
         }
         
-        uint32_t tStart = millis();
-        // 动态计算超时：假设最差网速 5KB/s，加上 5秒 基础时间
-        uint32_t dlTimeout = (audioLen / 1024) * 200 + 8000; 
-        
-        Serial.printf("[Server] Downloading... (Timeout: %d ms)\n", dlTimeout);
-
-        if (readBytesFixed(networkClient, isWiFi, downBuf, audioLen, dlTimeout)) {
-            Serial.printf("[Server] Download OK. Time: %d ms, Speed: %d KB/s\n", 
-                millis() - tStart, 
-                (millis() - tStart) > 0 ? (audioLen / (millis() - tStart)) : 0);
+        // 分块发送音频数据
+        size_t sent = 0;
+        while(sent < audioSize) {
+            size_t chunk = 1024;
+            if(audioSize - sent < chunk) chunk = audioSize - sent;
             
-            // 下载完成，尽早断开连接释放资源
-            if (isWiFi) networkClient->stop();
-            else My4G.closeTCP();
-            
-            MyUILogic.updateAssistantStatus("正在回复");
-            
-            // 3.3 播放
-            MyAudio.streamStart();
-            
-            // 分块写入音频流
-            size_t written = 0;
-            const size_t CHUNK = 512; 
-            while(written < audioLen) {
-                size_t w = (audioLen - written > CHUNK) ? CHUNK : (audioLen - written);
-                
-                // 写入环形缓冲区 (现在是阻塞式的，不会丢数据)
-                MyAudio.streamWrite(downBuf + written, w); 
-                written += w;
-                
-                // 简单流控
-                vTaskDelay(pdMS_TO_TICKS(2)); 
+            if(!My4G.sendData(MyAudio.record_buffer + sent, chunk)) {
+                Serial.println("[4G] Send Data Failed");
+                break; // 发送中断
             }
-            
-            MyAudio.streamEnd();
-            Serial.println("[Server] Play Done");
-            
-        } else {
-            Serial.println("ERR: Download Timeout");
+            sent += chunk;
+            vTaskDelay(pdMS_TO_TICKS(5)); // 防止看门狗复位
         }
-        
-        if (downBuf) free(downBuf); downBuf = NULL;
     }
+    
+    MyUILogic.updateAssistantStatus("思考中...");
 
-    // 正常结束
-    if (isWiFi) networkClient->stop();
-    else My4G.closeTCP(); // 确保关闭
-    MyUILogic.finishAIState();
-    return;
+    // 3. 接收响应
+    if (!isWiFi) {
+        // ==================== 4G 接收逻辑 ====================
+        
+        // (A) 接收 JSON 文本
+        Serial.println("[4G] Reading JSON...");
+        String jsonHex = "";
+        uint32_t startTime = millis();
+        
+        while (millis() - startTime < 15000) { 
+            uint8_t c;
+            // 每次读 1 个字节
+            if (My4G.readData(&c, 1, 100) == 1) { 
+                if (c == '*') break; // 遇到星号结束 JSON 部分
+                if (c != '\n' && c != '\r') jsonHex += (char)c; 
+                startTime = millis(); 
+            }
+            vTaskDelay(1);
+        }
 
-_EXIT_ERROR:
-    Serial.println("ERR: Transaction Failed");
-    if (jsonBuf) free(jsonBuf); // 安全释放
-    if (downBuf) free(downBuf);
-    if (isWiFi) networkClient->stop();
-    else My4G.closeTCP();
+        // 解析并执行 JSON 指令
+        if (jsonHex.length() > 0) {
+            Serial.printf("[4G] JSON Hex Len: %d\n", jsonHex.length());
+            int jLen = jsonHex.length() / 2;
+            char* jBuf = (char*)malloc(jLen + 1);
+            if (jBuf) {
+                for (int i=0; i<jLen; i++) jBuf[i] = (hexCharToVal(jsonHex[i*2]) << 4) | hexCharToVal(jsonHex[i*2+1]);
+                jBuf[jLen] = 0;
+                Serial.printf("[4G] JSON: %s\n", jBuf);
+                MyUILogic.handleAICommand(String(jBuf));
+                free(jBuf);
+            }
+        } else {
+             Serial.println("[4G] No JSON Response or Timeout");
+        }
+
+        // (B) 接收音频流
+        Serial.println("[4G] Reading Audio...");
+        MyUILogic.updateAssistantStatus("正在回复");
+        
+        // [核心修复] 播放开始前：打开功放
+        // 必须在这里打开，而不是在 App_Audio 里频繁开关
+        digitalWrite(PIN_PA_EN, HIGH);
+        delay(50); // 防爆破音预热
+
+        uint8_t hexPair[2]; 
+        int pairIdx = 0;
+        uint8_t pcmBuf[512]; 
+        int pcmIdx = 0;
+        
+        startTime = millis();
+        // 音频接收循环
+        while (millis() - startTime < 30000) { 
+            uint8_t c;
+            if (My4G.readData(&c, 1, 100) == 1) {
+                startTime = millis(); 
+                
+                if (c == '*') { // 遇到星号结束整个传输
+                    Serial.println("[4G] Audio End (*).");
+                    break; 
+                }
+                
+                // 过滤非 Hex 字符
+                if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'))) continue;
+
+                // 拼凑 Hex 对
+                hexPair[pairIdx++] = c;
+                if (pairIdx == 2) {
+                    pcmBuf[pcmIdx++] = (hexCharToVal(hexPair[0]) << 4) | hexCharToVal(hexPair[1]);
+                    pairIdx = 0;
+                    
+                    // 缓冲区满，播放一段
+                    if (pcmIdx == 512) {
+                        MyAudio.playChunk(pcmBuf, 512);
+                        pcmIdx = 0;
+                        // 注意：不要在这里加 delay，否则声音会卡
+                    }
+                }
+            } else {
+                vTaskDelay(1);
+            }
+        }
+        // 播放剩余的尾部音频
+        if (pcmIdx > 0) MyAudio.playChunk(pcmBuf, pcmIdx);
+
+        // [核心修复] 播放结束后：关闭功放
+        delay(50); // 等最后一点余音播完
+        digitalWrite(PIN_PA_EN, LOW);
+
+        // 关闭 4G TCP 连接
+        My4G.closeTCP();
+    } 
+    else { 
+        // ==================== WiFi 接收逻辑 ====================
+        // (如果是 WiFi 模式，记得也要检查是否有类似的 PA 控制逻辑)
+        // 这里仅作为示例保留关闭连接
+        networkClient->stop(); 
+    } 
+
+    // 4. 结束会话，恢复 UI
     MyUILogic.finishAIState();
+    Serial.println("[Server] Done.");
 }
