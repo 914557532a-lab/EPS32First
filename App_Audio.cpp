@@ -80,7 +80,7 @@ void AppAudio::init() {
     if (board.begin(cfg)) Serial.println("[Audio] Codec OK");
     else Serial.println("[Audio] Codec FAIL");
 
-    board.setVolume(35);       
+    board.setVolume(25);       
     board.setInputVolume(0); 
 
     auto config = i2s.defaultConfig(RXTX_MODE); 
