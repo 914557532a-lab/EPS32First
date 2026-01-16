@@ -3,29 +3,43 @@
 
 App4G My4G;
 
-// 定义 RingBuffer 大小 (8KB 足够缓冲音频流)
-#define RX_BUF_SIZE 8192
-static uint8_t rxBuf[RX_BUF_SIZE];
+// [配置] 128KB 缓冲，PSRAM 必备
+#define RX_BUF_SIZE (128 * 1024) 
+static uint8_t* rxBuf = NULL;
 static volatile int rxHead = 0;
 static volatile int rxTail = 0;
+
+static bool g_needManualRead = false; 
 
 void App4G::init() {
     pinMode(PIN_4G_PWR, OUTPUT);
     digitalWrite(PIN_4G_PWR, LOW); 
+
+    if (psramFound()) {
+        rxBuf = (uint8_t*)ps_malloc(RX_BUF_SIZE);
+        Serial.printf("[4G] Buffer alloc in PSRAM: %d KB\n", RX_BUF_SIZE/1024);
+    } else {
+        rxBuf = (uint8_t*)malloc(16384);
+        Serial.println("[4G] Warning: No PSRAM, alloc 16KB in SRAM");
+    }
 }
 
-// [修改] 增加调试回显
+// Spy 版本的 waitResponse
 bool App4G::waitResponse(const char* expected, uint32_t timeout) {
     unsigned long start = millis();
     String recv = "";
+    recv.reserve(64); 
+    
     while (millis() - start < timeout) {
-        if (_serial4G->available()) {
+        while (_serial4G->available()) {
             char c = _serial4G->read();
-            
-            // 【关键】打印 4G 模块的回复，方便你看到报错
-            Serial.write(c); 
-            
             recv += c;
+            
+            // 窃听 PUSH 通知
+            if (!g_needManualRead && recv.indexOf("+MIPPUSH") != -1) {
+                g_needManualRead = true;
+            }
+
             if (recv.indexOf(expected) != -1) return true;
         }
         vTaskDelay(1);
@@ -35,268 +49,281 @@ bool App4G::waitResponse(const char* expected, uint32_t timeout) {
 
 bool App4G::checkBaudrate(uint32_t baud) {
     _serial4G->updateBaudRate(baud);
-    delay(50);
+    delay(50); 
     while (_serial4G->available()) _serial4G->read(); 
-    _serial4G->println("AT");
-    return waitResponse("OK", 200);
+    
+    for (int i = 0; i < 3; i++) {
+        _serial4G->println("AT");
+        delay(50);
+        if (waitResponse("OK", 100)) return true;
+    }
+    return false;
 }
 
 void App4G::powerOn() {
     digitalWrite(PIN_4G_PWR, HIGH); delay(500);
-
-    // [修改] 降级到 921600
-    // 虽然比理论值 96KB/s 略低一点点，但稳定性更好
-    uint32_t targetBaud = 921600; 
     
-    // 1. 先尝试以目标波特率 (921600) 初始化
-    _serial4G->begin(targetBaud, SERIAL_8N1, PIN_4G_RX, PIN_4G_TX);
+    uint32_t targetBauds[] = {2000000, 921600};
+    uint32_t finalBaud = 0;
+
+    _serial4G->begin(115200, SERIAL_8N1, PIN_4G_RX, PIN_4G_TX);
+    _serial4G->setRxBufferSize(4096); 
     delay(100);
 
-    Serial.println("[4G] Trying to sync baudrate (Target: 921600)...");
+    Serial.println("[4G] Syncing...");
 
-    // 2. 检查当前是否已经是 921600
-    if (!checkBaudrate(targetBaud)) {
-        Serial.println("[4G] Target baud failed, scanning other rates...");
+    uint32_t foundBaud = 0;
+    uint32_t scanBauds[] = {115200, 921600, 2000000, 1500000, 3000000};
+    
+    for (uint32_t b : scanBauds) {
+        if (checkBaudrate(b)) { foundBaud = b; break; }
+    }
+
+    if (foundBaud == 0) {
+        Serial.println("[4G] Sync failed, Hard Resetting...");
+        pinMode(PIN_4G_PWRKEY, OUTPUT);
+        digitalWrite(PIN_4G_PWRKEY, HIGH); delay(100);
+        digitalWrite(PIN_4G_PWRKEY, LOW);  delay(2500);
+        digitalWrite(PIN_4G_PWRKEY, HIGH); pinMode(PIN_4G_PWRKEY, INPUT);
+        delay(6000); 
+        foundBaud = 115200;
+    }
+
+    Serial.printf("[4G] Found module at %d\n", foundBaud);
+    
+    bool success = false;
+    for (uint32_t t : targetBauds) {
+        if (foundBaud == t) {
+            finalBaud = t;
+            success = true;
+            break;
+        }
         
-        // 3. 扫描：如果模块还在 2000000 (上次设置的)，把它降下来
-        if (checkBaudrate(2000000)) {
-            Serial.println("[4G] Found at 2M, downgrading to 921600...");
-            _serial4G->printf("AT+IPR=%d\r\n", targetBaud); 
-            delay(200); 
-        } 
-        // 4. 扫描：如果是出厂默认 115200，把它升上去
-        else if (checkBaudrate(115200)) {
-            Serial.println("[4G] Found at 115200, upgrading to 921600...");
-            _serial4G->printf("AT+IPR=%d\r\n", targetBaud); 
-            delay(200);
-        }
-        else {
-            // 5. 实在连不上，硬件复位
-            Serial.println("[4G] Hard Resetting...");
-            pinMode(PIN_4G_PWRKEY, OUTPUT);
-            digitalWrite(PIN_4G_PWRKEY, HIGH); delay(100);
-            digitalWrite(PIN_4G_PWRKEY, LOW);  delay(2500);
-            digitalWrite(PIN_4G_PWRKEY, HIGH); pinMode(PIN_4G_PWRKEY, INPUT);
-            delay(10000); 
+        Serial.printf("[4G] Switching to %d...\n", t);
+        _serial4G->printf("AT+IPR=%d\r\n", t);
+        delay(200); 
+        _serial4G->begin(t, SERIAL_8N1, PIN_4G_RX, PIN_4G_TX); 
+        delay(100);
+
+        if (checkBaudrate(t)) {
+            finalBaud = t;
+            success = true;
+            _serial4G->println("AT&W"); 
+            Serial.println(" -> OK!");
+            break;
+        } else {
+            Serial.println(" -> Failed, reverting...");
+            _serial4G->begin(foundBaud, SERIAL_8N1, PIN_4G_RX, PIN_4G_TX);
+            delay(100);
+            checkBaudrate(foundBaud); 
         }
     }
     
-    // 6. 更新 ESP32 串口速度
-    _serial4G->updateBaudRate(targetBaud);
-    delay(50);
-    
-    // 7. 最终确认
-    _serial4G->println("AT"); 
-    if (waitResponse("OK", 1000)) {
-        Serial.printf("[4G] Synced at %d baud!\n", targetBaud);
-    } else {
-        Serial.println("[4G] Warning: Sync Failed.");
+    if (!success) {
+        Serial.println("[4G] Fallback to 921600.");
+        finalBaud = 921600;
+        _serial4G->printf("AT+IPR=%d\r\n", finalBaud);
+        delay(200);
+        _serial4G->begin(finalBaud, SERIAL_8N1, PIN_4G_RX, PIN_4G_TX);
     }
+
+    delay(100);
+    bool online = false;
+    for(int i=0; i<5; i++) {
+        _serial4G->println("AT");
+        if(waitResponse("OK", 500)) { online = true; break; }
+        delay(500);
+    }
+
+    if (online) Serial.printf("[4G] Online at %d baud.\n", finalBaud);
+    else Serial.println("[4G] FATAL: Module unresponsive.");
 
     _serial4G->println("ATE0"); waitResponse("OK", 500); 
+    _serial4G->println("AT+CSCLK=0"); waitResponse("OK", 500);
 
     if (_modem == nullptr) _modem = new TinyGsm(*_serial4G);
     if (_client == nullptr) _client = new TinyGsmClient(*_modem);
-}
-
-// [修复] 真正的连接检查逻辑
-bool App4G::connect(unsigned long timeout_ms) {
-    unsigned long start = millis();
-    Serial.print("[4G] Checking Network... ");
     
-    while (millis() - start < timeout_ms) {
-        // 使用 TinyGsm 检查网络注册状态
-        if (_modem && _modem->isNetworkConnected()) {
-            Serial.println("OK! (Connected)");
-            return true;
-        }
-        
-        Serial.print(".");
-        vTaskDelay(1000); 
-    }
-    
-    Serial.println(" Timeout!");
-    return false;
+    _has_pending_data = false;
+    g_needManualRead = false;
 }
 
 bool App4G::connectTCP(const char* host, uint16_t port) {
     rxHead = rxTail = 0; 
     g_st = ST_SEARCH;    
+    g_needManualRead = false;
+    _has_pending_data = false;
     
-    // 1. 关闭可能存在的旧连接
-    _serial4G->println("AT+MIPCLOSE=1"); 
-    waitResponse("OK", 500);    
-
-    // [删除] 既然之前报错 ERROR，说明模块不支持或不需要这个设置
-    // 而且我们需要发送原始二进制，不设置反而更好！
-    // _serial4G->println("AT+GTSET=\"IPRFMT\",2"); 
-    // waitResponse("OK", 1000);
-
-    // 2. 双重保险：检查是否有 IP，没有则激活
-    // (防止 AT+MIPCALL=1 之后过一会掉线)
+    _serial4G->println("AT+MIPCLOSE=1"); waitResponse("OK", 500);    
+    
     _serial4G->println("AT+MIPCALL?");
-    // 如果回复 +MIPCALL: 0 说明没 IP
     if (waitResponse("+MIPCALL: 0", 500)) {
-         Serial.println("[4G] Reactivating IP...");
          _serial4G->println("AT+CGDCONT=1,\"IP\",\"cmnet\""); waitResponse("OK", 500);
-         _serial4G->println("AT+MIPCALL=1"); 
-         waitResponse("OK", 3000);
+         _serial4G->println("AT+MIPCALL=1"); waitResponse("OK", 3000);
     }
 
-    // 3. 发起连接
     _serial4G->printf("AT+MIPOPEN=1,0,\"%s\",%d,0\r\n", host, port);
     
-    // 4. [核心修复] 智能等待连接结果
-    // 只要收到 "+MIPOPEN: 1,1" 或者 "CONNECT" 都算成功
     unsigned long start = millis();
-    while (millis() - start < 20000) {
+    while (millis() - start < 15000) {
         if (_serial4G->available()) {
             String line = _serial4G->readStringUntil('\n');
             line.trim();
-            
-            // 打印调试信息，让你看到发生了什么
             if (line.length() > 0) Serial.println("[4G RAW] " + line);
             
-            // 判定成功条件：
-            // 条件A: 出现 CONNECT (某些固件)
-            // 条件B: 出现 +MIPOPEN: 1,1 (你的固件)
             if (line.indexOf("CONNECT") != -1) return true;
             if (line.indexOf("+MIPOPEN:") != -1 && line.indexOf(",1") != -1) return true;
-            
-            // 判定失败条件
             if (line.indexOf("ERROR") != -1) return false;
             if (line.indexOf("+MIPOPEN:") != -1 && line.indexOf(",0") != -1) return false;
         }
         vTaskDelay(10);
     }
-    
-    Serial.println("[4G] TCP Connect Timeout");
     return false;
 }
 
 void App4G::closeTCP() {
     _serial4G->println("AT+MIPCLOSE=1");
-    waitResponse("OK", 2000);
+    waitResponse("OK", 1000);
 }
 
 bool App4G::sendData(const uint8_t* data, size_t len) {
     _serial4G->printf("AT+MIPSEND=1,%d\r\n", len);
-    if (!waitResponse(">", 5000)) return false;
+    if (!waitResponse(">", 3000)) return false;
     _serial4G->write(data, len);
-    return waitResponse("OK", 10000); 
+    return waitResponse("OK", 5000); 
 }
 
 bool App4G::sendData(uint8_t* data, size_t len) {
     return sendData((const uint8_t*)data, len);
 }
 
-// ==========================================================
-// 核心：高性能状态机 (无 String, 纯字符匹配)
-// ==========================================================
-// 目标匹配模式: "+MIPRTCP:"
-static const char* HEADER_MATCH = "+MIPRTCP:";
+// 状态机变量
 static int matchIdx = 0;
+static int dataBytesLeft = 0;
 static char lenBuf[16]; 
 static int lenBufIdx = 0;
-static int dataBytesLeft = 0;
+
+void App4G::resetParser() {
+    g_st = ST_SEARCH;
+    matchIdx = 0;
+}
 
 void App4G::process4GStream() {
+    if (!rxBuf) return;
+
     while (_serial4G->available()) {
         char c = _serial4G->read();
 
         switch (g_st) {
             case ST_SEARCH: 
-                // 逐字匹配 "+MIPRTCP:"
-                if (c == HEADER_MATCH[matchIdx]) {
-                    matchIdx++;
-                    if (HEADER_MATCH[matchIdx] == '\0') {
-                        // 匹配成功!
-                        g_st = ST_SKIP_ID;
-                        matchIdx = 0;
+                if (c == '+') {
+                    String header = "+";
+                    uint32_t t = millis();
+                    
+                    // [修复] 增加预读超时时间到 50ms
+                    // 确保能读完 "+MIPPUSH:"，防止因串口数据分段到达而匹配失败
+                    while(millis() - t < 50) { 
+                        if(_serial4G->available()) {
+                            char n = _serial4G->read();
+                            header += n;
+                            if (header.length() >= 9) break; 
+                        }
                     }
-                } else {
-                    // 匹配失败，回退
-                    if (c == HEADER_MATCH[0]) matchIdx = 1;
-                    else matchIdx = 0;
+                    
+                    if (header.startsWith("+MIPRTCP:")) {
+                        g_st = ST_SKIP_ID; 
+                    } else if (header.startsWith("+MIPREAD:")) {
+                        g_st = ST_READ_LEN; 
+                        lenBufIdx = 0; memset(lenBuf, 0, sizeof(lenBuf));
+                    } else if (header.startsWith("+MIPPUSH:")) {
+                        g_needManualRead = true; 
+                        g_st = ST_SEARCH;
+                    } else {
+                        // 没匹配上，重新开始搜索
+                        g_st = ST_SEARCH;
+                    }
                 }
                 break;
 
             case ST_SKIP_ID:
-                // 跳过 " 1," 这样的ID部分，直到遇到逗号
                 if (c == ',') {
                     g_st = ST_READ_LEN;
-                    lenBufIdx = 0;
-                    memset(lenBuf, 0, sizeof(lenBuf));
+                    lenBufIdx = 0; memset(lenBuf, 0, sizeof(lenBuf));
                 }
                 break;
 
             case ST_READ_LEN:
-                // 读取长度数字，直到遇到下一个逗号
-                if (c == ',') {
+                if (c == ',' || c == '\r' || c == '\n') { 
                     lenBuf[lenBufIdx] = '\0';
-                    dataBytesLeft = atoi(lenBuf); // 解析长度
+                    dataBytesLeft = atoi(lenBuf);
                     if (dataBytesLeft > 0) {
                         g_st = ST_READ_DATA;
+                        _has_pending_data = true; 
                     } else {
+                        _has_pending_data = false;
                         g_st = ST_SEARCH; 
                     }
                 } else if (isDigit(c)) {
-                    if (lenBufIdx < 10) { // 防止溢出
-                        lenBuf[lenBufIdx++] = c;
-                    }
+                    if (lenBufIdx < 10) lenBuf[lenBufIdx++] = c;
                 }
                 break;
 
             case ST_READ_DATA:
                 if (dataBytesLeft > 0) {
-                    // 存入环形缓冲区
-                    int next = (rxHead + 1) % RX_BUF_SIZE;
+                    int rxSize = (psramFound()) ? RX_BUF_SIZE : 16384; 
+                    int next = (rxHead + 1) % rxSize;
                     if (next != rxTail) {
                         rxBuf[rxHead] = (uint8_t)c;
                         rxHead = next;
                     }
                     dataBytesLeft--;
                 }
-                
-                if (dataBytesLeft == 0) {
-                    g_st = ST_SEARCH; // 收完这一包，继续找下一包
-                    matchIdx = 0;
-                }
+                if (dataBytesLeft == 0) g_st = ST_SEARCH; 
                 break;
         }
     }
 }
 
 int App4G::popCache() {
+    if (!rxBuf) return -1;
     if (rxHead == rxTail) return -1;
+    
+    int rxSize = (psramFound()) ? RX_BUF_SIZE : 16384;
     uint8_t c = rxBuf[rxTail];
-    rxTail = (rxTail + 1) % RX_BUF_SIZE;
+    rxTail = (rxTail + 1) % rxSize;
     return c;
 }
 
 int App4G::readData(uint8_t* buf, size_t wantLen, uint32_t timeout_ms) {
     unsigned long start = millis();
     size_t received = 0;
+    
+    // 初始触发
+    if ((rxHead == rxTail) && (g_needManualRead || _has_pending_data)) {
+        g_needManualRead = false;
+        _serial4G->println("AT+MIPREAD=1,1500");
+    }
+
     while (received < wantLen && (millis() - start < timeout_ms)) {
-        process4GStream(); // 搬运数据
+        process4GStream(); 
         
         int b = popCache();
         if (b != -1) {
             buf[received++] = (uint8_t)b;
-            start = millis(); // 收到数据刷新超时
-            
-            // 极速模式下，减少 vTaskDelay 频率
-            if (received % 256 == 0) vTaskDelay(1); 
+            start = millis(); 
+            if (received == wantLen) break; 
         } else {
-            vTaskDelay(1); // 没数据时休息一下
+            // 循环内触发
+            if (g_needManualRead || _has_pending_data) {
+                 g_needManualRead = false;
+                 _serial4G->println("AT+MIPREAD=1,1500");
+                 start = millis(); 
+            }
+            delayMicroseconds(100);
         }
     }
     return received;
 }
 
-// 简单的 Getter 包装
 bool App4G::isConnected() { return _modem && _modem->isNetworkConnected(); }
-String App4G::getIMEI() { return _modem ? _modem->getIMEI() : ""; }
 TinyGsmClient& App4G::getClient() { return *_client; }
-void App4G::sendRawAT(String cmd) { _serial4G->println(cmd); }
-int App4G::getSignalCSQ() { return _modem ? _modem->getSignalQuality() : 0; }
